@@ -1,6 +1,36 @@
-import { Link } from 'react-router-dom'
+import { useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { useAuth } from '../context/AuthContext.jsx'
+import { getUserRole } from '../lib/authService.js'
 
 export default function LoginPage() {
+  const { signIn } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  // Banner shown after a successful registration / password reset.
+  const notice = location.state?.notice ?? ''
+
+  async function handleSubmit(event) {
+    event.preventDefault()
+    setError('')
+
+    setSubmitting(true)
+    try {
+      const { user } = await signIn(email.trim(), password)
+      navigate(`/${getUserRole(user)}`, { replace: true })
+    } catch {
+      // Do not leak whether an account with this email exists (locked decision #11).
+      setError('Invalid email or password.')
+      setSubmitting(false)
+    }
+  }
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
       <div className="w-full max-w-md">
@@ -16,18 +46,27 @@ export default function LoginPage() {
           </p>
         </div>
 
+        {notice && (
+          <div className="mb-4 rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+            {notice}
+          </div>
+        )}
+
         <div className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-          <form onSubmit={(e) => e.preventDefault()} className="space-y-4">
+          <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label htmlFor="email" className="block text-sm font-medium text-gray-700">
-                Email
+                College email
               </label>
               <input
                 id="email"
                 name="email"
                 type="email"
                 autoComplete="email"
-                placeholder="you@college.edu"
+                required
+                placeholder="you@gprec.ac.in"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
                 className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none"
               />
             </div>
@@ -40,49 +79,45 @@ export default function LoginPage() {
                 name="password"
                 type="password"
                 autoComplete="current-password"
+                required
                 placeholder="••••••••"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
                 className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none"
               />
             </div>
+
+            {error && (
+              <p role="alert" className="text-sm text-red-600">
+                {error}
+              </p>
+            )}
+
             <button
               type="submit"
-              disabled
-              title="Authentication will be added in a later phase"
-              className="w-full cursor-not-allowed rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white opacity-60"
+              disabled={submitting}
+              className="w-full rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              Sign in
+              {submitting ? 'Signing in…' : 'Sign in'}
             </button>
           </form>
-          <p className="mt-4 text-center text-xs text-gray-500">
-            Authentication will be added in a later phase.
-          </p>
-        </div>
 
-        <div className="mt-6 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-          <p className="text-center text-xs font-medium uppercase tracking-wide text-gray-400">
-            Preview role pages (Day 1 only)
-          </p>
-          <div className="mt-3 flex justify-center gap-2">
+          <div className="mt-4 flex items-center justify-between text-sm">
             <Link
-              to="/student"
-              className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700"
+              to="/forgot-password"
+              className="font-medium text-blue-600 hover:text-blue-700"
             >
-              Student
-            </Link>
-            <Link
-              to="/staff"
-              className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700"
-            >
-              Staff
-            </Link>
-            <Link
-              to="/admin"
-              className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700"
-            >
-              Admin
+              Forgot password?
             </Link>
           </div>
         </div>
+
+        <p className="mt-6 text-center text-sm text-gray-600">
+          Don&apos;t have an account?{' '}
+          <Link to="/register" className="font-medium text-blue-600 hover:text-blue-700">
+            Create a student account
+          </Link>
+        </p>
       </div>
     </div>
   )

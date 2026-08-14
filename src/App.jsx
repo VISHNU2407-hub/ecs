@@ -1,48 +1,82 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import AppLayout from './components/layout/AppLayout.jsx'
+import ProtectedRoute, { PublicOnlyRoute } from './components/ProtectedRoute.jsx'
+import { AuthProvider } from './context/AuthContext.jsx'
 import LoginPage from './pages/LoginPage.jsx'
+import RegisterPage from './pages/RegisterPage.jsx'
+import ForgotPasswordPage from './pages/ForgotPasswordPage.jsx'
+import UpdatePasswordPage from './pages/UpdatePasswordPage.jsx'
 import StudentPage from './pages/StudentPage.jsx'
 import StaffPage from './pages/StaffPage.jsx'
 import AdminPage from './pages/AdminPage.jsx'
 
 export default function App() {
   return (
-    <Routes>
-      <Route path="/" element={<Navigate to="/login" replace />} />
-      <Route path="/login" element={<LoginPage />} />
+    <AuthProvider>
+      <Routes>
+        <Route path="/" element={<Navigate to="/login" replace />} />
 
-      {/*
-        Role-based areas. Each is wrapped in the shared layout, which
-        renders navigation based on the role. In a later phase the role
-        will come from the authenticated user instead of the route.
-      */}
-      <Route
-        path="/student"
-        element={
-          <AppLayout role="student">
-            <StudentPage />
-          </AppLayout>
-        }
-      />
-      <Route
-        path="/staff"
-        element={
-          <AppLayout role="staff">
-            <StaffPage />
-          </AppLayout>
-        }
-      />
-      <Route
-        path="/admin"
-        element={
-          <AppLayout role="admin">
-            <AdminPage />
-          </AppLayout>
-        }
-      />
+        {/* Public auth pages. Signed-in users are redirected to their dashboard. */}
+        <Route
+          path="/login"
+          element={
+            <PublicOnlyRoute>
+              <LoginPage />
+            </PublicOnlyRoute>
+          }
+        />
+        <Route
+          path="/register"
+          element={
+            <PublicOnlyRoute>
+              <RegisterPage />
+            </PublicOnlyRoute>
+          }
+        />
+        <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+        <Route path="/update-password" element={<UpdatePasswordPage />} />
 
-      {/* Unknown routes fall back to the login page. */}
-      <Route path="*" element={<Navigate to="/login" replace />} />
-    </Routes>
+        {/*
+          Role-based areas. Each is wrapped in the shared layout and the
+          role-aware ProtectedRoute guard, which sends users without the
+          required role to their own dashboard. The role itself is resolved
+          by authService.getUserRole (auth metadata on Day 2; the users table
+          will become the source of truth on Day 3).
+        */}
+        <Route
+          path="/student"
+          element={
+            <ProtectedRoute role="student">
+              <AppLayout role="student">
+                <StudentPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/staff"
+          element={
+            <ProtectedRoute role="staff">
+              <AppLayout role="staff">
+                <StaffPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin"
+          element={
+            <ProtectedRoute role="admin">
+              <AppLayout role="admin">
+                <AdminPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        {/* Unknown routes fall back to the login page. */}
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    </AuthProvider>
   )
 }

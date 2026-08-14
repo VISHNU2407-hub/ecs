@@ -1,4 +1,5 @@
-import { Link, NavLink } from 'react-router-dom'
+import { Link, NavLink, useNavigate } from 'react-router-dom'
+import { useAuth } from '../../context/AuthContext.jsx'
 
 /**
  * Central definition of navigation items per role.
@@ -20,8 +21,19 @@ const ROLE_LABELS = {
 }
 
 export default function AppLayout({ role, children }) {
+  const { user, signOut } = useAuth()
+  const navigate = useNavigate()
+
   const navItems = NAV_ITEMS[role] ?? []
   const roleLabel = ROLE_LABELS[role] ?? role
+
+  async function handleSignOut() {
+    try {
+      await signOut()
+    } finally {
+      navigate('/login', { replace: true })
+    }
+  }
 
   return (
     <div className="flex min-h-screen flex-col bg-gray-50">
@@ -54,13 +66,21 @@ export default function AppLayout({ role, children }) {
           </nav>
 
           <div className="flex shrink-0 items-center gap-3">
+            {user?.email && (
+              <span className="hidden max-w-[180px] truncate text-xs text-gray-500 sm:block">
+                {user.email}
+              </span>
+            )}
             <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700">
               {roleLabel}
             </span>
-            {/* Placeholder sign-out — wire to real auth in a later phase. */}
-            <Link to="/login" className="text-sm font-medium text-gray-500 hover:text-gray-900">
+            <button
+              type="button"
+              onClick={handleSignOut}
+              className="text-sm font-medium text-gray-500 hover:text-gray-900"
+            >
               Sign out
-            </Link>
+            </button>
           </div>
         </div>
       </header>
@@ -69,7 +89,7 @@ export default function AppLayout({ role, children }) {
 
       <footer className="border-t border-gray-200 bg-white py-4">
         <p className="text-center text-xs text-gray-500">
-          College Complaint Management System — Day 1 scaffold
+          College Complaint Management System — Day 2 (Authentication)
         </p>
       </footer>
     </div>
