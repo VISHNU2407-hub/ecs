@@ -17,6 +17,8 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "embedded-postgres": "^18.4.0-beta.17",
+    "pg": "^8.23.0",
     "tailwindcss": "^4.0.0",
     "vite": "^6.0.5"
   }

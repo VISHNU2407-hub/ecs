@@ -39,9 +39,9 @@ export default function App() {
         {/*
           Role-based areas. Each is wrapped in the shared layout and the
           role-aware ProtectedRoute guard, which sends users without the
-          required role to their own dashboard. The role itself is resolved
-          by authService.getUserRole (auth metadata on Day 2; the users table
-          will become the source of truth on Day 3).
+          required role to their own dashboard. The role is resolved by
+          authService.getUserRole from public.profiles (the authoritative
+          source since Day 3).
         */}
         <Route
           path="/student"

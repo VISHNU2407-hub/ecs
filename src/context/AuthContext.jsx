@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabaseClient.js'
 import {
+  getDashboardKey,
   getUserRole,
   resetPassword as resetPasswordAction,
   signIn as signInAction,
@@ -19,7 +20,11 @@ const AuthContext = createContext(null)
 export function AuthProvider({ children }) {
   const [session, setSession] = useState(null)
   const [user, setUser] = useState(null)
-  // True while the existing session is being checked on first load.
+  // The authoritative role from public.profiles (Day 3). Resolved asynchronously
+  // after the session is known; falls back to 'student' if the profile lookup
+  // fails or the migration has not been applied yet.
+  const [role, setRole] = useState(null)
+  // True while the session (and role) is being checked on first load.
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -30,17 +35,28 @@ export function AuthProvider({ children }) {
 
     let mounted = true
 
-    supabase.auth.getSession().then(({ data }) => {
+    async function resolveRoleForUser(nextUser) {
+      if (!nextUser) {
+        setRole(null)
+        return
+      }
+      const nextRole = await getUserRole(nextUser)
+      if (mounted) setRole(nextRole)
+    }
+
+    supabase.auth.getSession().then(async ({ data }) => {
       if (!mounted) return
       setSession(data.session)
       setUser(data.session?.user ?? null)
-      setLoading(false)
+      await resolveRoleForUser(data.session?.user ?? null)
+      if (mounted) setLoading(false)
     })
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+    const { data: listener } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
       setSession(newSession)
       setUser(newSession?.user ?? null)
-      setLoading(false)
+      await resolveRoleForUser(newSession?.user ?? null)
+      if (mounted) setLoading(false)
     })
 
     return () => {
@@ -53,7 +69,9 @@ export function AuthProvider({ children }) {
     () => ({
       session,
       user,
-      role: user ? getUserRole(user) : null,
+      role,
+      // Route-safe dashboard key derived from the DB role (see getDashboardKey).
+      dashboardKey: role ? getDashboardKey(role) : null,
       loading,
       signIn: signInAction,
       signUp: signUpAction,
@@ -61,7 +79,7 @@ export function AuthProvider({ children }) {
       resetPassword: resetPasswordAction,
       updatePassword: updatePasswordAction,
     }),
-    [session, user, loading],
+    [session, user, role, loading],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

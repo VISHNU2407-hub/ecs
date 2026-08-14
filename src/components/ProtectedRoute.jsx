@@ -9,14 +9,15 @@ import LoadingScreen from './LoadingScreen.jsx'
  * - users who do not have the required role are sent to their own dashboard.
  *
  * The role requirement is enforced against the role resolved by
- * authService.getUserRole (currently auth metadata; users table on Day 3).
+ * authService.getUserRole, which reads the authoritative role from
+ * public.profiles (Day 3).
  */
 export default function ProtectedRoute({ role, children }) {
-  const { user, role: userRole, loading } = useAuth()
+  const { user, dashboardKey, loading } = useAuth()
 
   if (loading) return <LoadingScreen />
   if (!user) return <Navigate to="/login" replace />
-  if (role && userRole !== role) return <Navigate to={`/${userRole}`} replace />
+  if (role && dashboardKey !== role) return <Navigate to={`/${dashboardKey}`} replace />
   return children
 }
 
@@ -25,9 +26,9 @@ export default function ProtectedRoute({ role, children }) {
  * in is sent to their own dashboard instead.
  */
 export function PublicOnlyRoute({ children }) {
-  const { user, role, loading } = useAuth()
+  const { user, dashboardKey, loading } = useAuth()
 
   if (loading) return <LoadingScreen />
-  if (user) return <Navigate to={`/${role}`} replace />
+  if (user) return <Navigate to={`/${dashboardKey}`} replace />
   return children
 }

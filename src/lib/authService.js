@@ -19,15 +19,55 @@ function ensureSupabase() {
 }
 
 /**
- * Day 2 role resolution (interim).
+ * Day 3 role resolution.
  *
- * The users table does not exist yet, so roles cannot be looked up in the
- * database. Everyone who self-registers through /register is a student, so the
- * role is read from Supabase auth user metadata set at sign-up. On Day 3 this
- * function gets replaced by a users-table lookup (staff/admin roles live there).
+ * The authoritative application role lives in public.profiles.role (set by a
+ * database trigger at sign-up). Auth user metadata is NOT authoritative — a
+ * user can edit their own metadata, so it must never decide access. If the
+ * profile row is missing (e.g. the Day 3 migration has not been applied yet)
+ * or the lookup fails, the role falls back to 'student' so sign-in never
+ * blocks and least privilege is preserved.
  */
-export function getUserRole(user) {
-  return user?.user_metadata?.role ?? 'student'
+export async function getUserRole(user) {
+  if (!user?.id || !supabase) return 'student'
+  try {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .maybeSingle()
+    if (error) throw error
+    return data?.role ?? 'student'
+  } catch {
+    // Never block sign-in on a role lookup failure; default to least privilege.
+    return 'student'
+  }
+}
+
+/**
+ * Maps the authoritative database role to the dashboard route key used by
+ * the router. The DB roles are student / faculty / admin / committee; the
+ * existing routes are /student, /staff and /admin.
+ *
+ *   faculty  -> staff  (the staff dashboard is the faculty dashboard)
+ *   committee -> staff (interim: committee gets the staff placeholder until
+ *                       its own dashboard exists in Day 4+)
+ *
+ * Unknown roles fall back to the student dashboard (least privilege).
+ */
+export function getDashboardKey(role) {
+  switch (role) {
+    case 'student':
+      return 'student'
+    case 'faculty':
+      return 'staff'
+    case 'admin':
+      return 'admin'
+    case 'committee':
+      return 'staff'
+    default:
+      return 'student'
+  }
 }
 
 export async function signIn(email, password) {
@@ -43,8 +83,9 @@ export async function signUp(email, password) {
     email,
     password,
     options: {
-      // Interim role source until the users table exists (Day 3). Every
-      // account created here is a student by registration policy.
+      // Informational only — the authoritative role is created by the
+      // database sign-up trigger as 'student'. This metadata is never used
+      // for access decisions.
       data: { role: 'student' },
     },
   })

@@ -14,6 +14,9 @@ dist-ssr/
 *.log
 npm-debug.log*
 
+# Local verification harness (throwaway embedded Postgres)
+.tmp/
+
 # Editor / OS
 .vscode/
 .idea/
