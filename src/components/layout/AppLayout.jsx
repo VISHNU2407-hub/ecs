@@ -9,7 +9,10 @@ import { useAuth } from '../../context/AuthContext.jsx'
  * item list will grow as its features are built.
  */
 const NAV_ITEMS = {
-  student: [{ to: '/student', label: 'Dashboard' }],
+  student: [
+    { to: '/student', label: 'Dashboard' },
+    { to: '/student/complaints/new', label: 'New Complaint' },
+  ],
   staff: [{ to: '/staff', label: 'Dashboard' }],
   admin: [{ to: '/admin', label: 'Dashboard' }],
 }
@@ -89,7 +92,7 @@ export default function AppLayout({ role, children }) {
 
       <footer className="border-t border-gray-200 bg-white py-4">
         <p className="text-center text-xs text-gray-500">
-          College Complaint Management System — Day 3 (Database, Roles & Security)
+          College Complaint Management System — Day 4 (Complaint Submission)
         </p>
       </footer>
     </div>

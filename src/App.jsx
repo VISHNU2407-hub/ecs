@@ -7,6 +7,7 @@ import RegisterPage from './pages/RegisterPage.jsx'
 import ForgotPasswordPage from './pages/ForgotPasswordPage.jsx'
 import UpdatePasswordPage from './pages/UpdatePasswordPage.jsx'
 import StudentPage from './pages/StudentPage.jsx'
+import SubmitComplaintPage from './pages/SubmitComplaintPage.jsx'
 import StaffPage from './pages/StaffPage.jsx'
 import AdminPage from './pages/AdminPage.jsx'
 
@@ -49,6 +50,18 @@ export default function App() {
             <ProtectedRoute role="student">
               <AppLayout role="student">
                 <StudentPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        {/* Day 4 — complaint submission. Students only; staff/admin/committee
+            have no complaint-submission workflow. */}
+        <Route
+          path="/student/complaints/new"
+          element={
+            <ProtectedRoute role="student">
+              <AppLayout role="student">
+                <SubmitComplaintPage />
               </AppLayout>
             </ProtectedRoute>
           }

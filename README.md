@@ -5,7 +5,10 @@ Day 1 provided the app shell and placeholder role pages; Day 2 added
 email/password authentication (sign-up, login, password reset) with role-aware
 route protection; Day 3 adds the PostgreSQL database, role & security
 foundation for the **ECS** department pilot (anonymous complaints, RLS,
-identity-safe staff views).
+identity-safe staff views); Day 4 adds the student complaint submission
+flow — a category-aware form (categories fetched from the database), a
+validated description and priority, and database-generated CMP-XXXX ticket
+numbers.
 
 ## Getting started
 
@@ -98,12 +101,62 @@ missing.
 - No secret keys are used anywhere in the frontend (`sb_secret_*` appears only
   in documentation comments); `service_role` is never used in client code.
 
-### Not implemented yet (Day 4+)
+### Complaint submission (Day 4)
 
-Complaint submission/dashboard/detail UI, anonymous chat UI, Supabase
-Realtime, notifications, escalation jobs, analytics, duplicate detection,
-public complaint board, identity-reveal UI, admin/faculty account management,
-file upload UI, and category assignment UI. The schema is ready for these.
+The complete student submission flow is implemented:
+
+```
+Student logs in → Student dashboard → "Submit Complaint" →
+Category (from public.complaint_categories) → Description → Priority →
+Submit → Supabase INSERT → CMP-XXXX generated → Success + ticket number
+```
+
+- Route: `/student/complaints/new` (student-only; staff/admin/committee have
+  no submission workflow). The student dashboard has a "Submit Complaint"
+  card, and the student header nav links to the form.
+- Categories are **fetched from `public.complaint_categories`** — nothing is
+  hardcoded in the frontend, so the list always reflects the database.
+- The form sends only the fields a student may control: `student_id` (their
+  own id — required by the schema, no default, and validated by RLS via
+  `student_id = auth.uid()`), `category_id`, `description`, `priority`.
+  `ticket_number`, `is_sensitive`, `handler_type`, `department_id`, `status`
+  and timestamps are all derived by the Day 3 trigger — the client never
+  sends them and cannot forge them (they are excluded from the INSERT grant).
+- `attachment_url` exists in the schema but file storage is not implemented
+  yet, so the field is intentionally unused in Day 4 (no upload UI).
+- Validation (client-side): category required and must be one of the fetched
+  ids; description required with a 20-character minimum; priority required
+  and one of `low` / `medium` / `high` / `urgent` (default `medium`).
+- UX: clear labels with required indicators, inline field errors, a category
+  loading state with retry, a disabled submit button while submitting, an
+  in-flight guard against duplicate submissions, a success screen showing the
+  generated ticket number, and a "Back to Student Dashboard" link plus
+  "Submit another complaint". Raw database errors are never shown to the
+  user.
+- Sensitive handling is **not** duplicated in the frontend: submitting
+  "Harassment / Ragging" makes the database derive `is_sensitive = true` and
+  `handler_type = committee` automatically.
+
+Local verification (no Supabase account needed):
+
+```bash
+node scripts/verify-day4.mjs
+```
+
+This boots a throwaway PostgreSQL instance, applies the Day 3 migration
+unchanged, and runs the exact client payload through the schema — category
+fetch, successful insert with `RETURNING`, DB-derived ticket/status/
+department/sensitivity, committee handling for sensitive categories, priority
+default, RLS isolation, and rejection of forged or missing values (34
+checks).
+
+### Not implemented yet (Day 5+)
+
+Complaint dashboard/tracking and detail views (Day 5), anonymous chat UI,
+Supabase Realtime, notifications, escalation jobs, analytics, duplicate
+detection, public complaint board, identity-reveal UI, admin/faculty account
+management, file upload UI, and category assignment UI. The schema is ready
+for these.
 
 ## Authentication (Day 2)
 
@@ -142,6 +195,7 @@ arrives in Day 4+). Unknown roles fall back to `student`.
 | `/forgot-password`| Request a password reset email          | Public                |
 | `/update-password`| Set a new password (recovery link lands here) | Recovery session |
 | `/student`        | Student dashboard placeholder           | Signed-in students    |
+| `/student/complaints/new` | Submit a complaint form        | Signed-in students    |
 | `/staff`          | Staff dashboard placeholder             | Faculty               |
 | `/admin`          | Admin dashboard placeholder             | Admin                 |
 
@@ -157,21 +211,23 @@ Unknown routes redirect to `/login`.
 │   └── migrations/
 │       └── 20260814000000_day3_database_security_foundation.sql
 ├── scripts/
-│   └── verify-day3.mjs       # Local Postgres verification harness (Day 3)
+│   ├── verify-day3.mjs       # Local Postgres verification harness (Day 3)
+│   └── verify-day4.mjs       # Local Postgres verification harness (Day 4)
 └── src/
     ├── main.jsx              # React root + BrowserRouter
     ├── App.jsx               # Route definitions + AuthProvider
     ├── index.css             # Tailwind entry (@import "tailwindcss")
     ├── lib/
-    │   ├── supabaseClient.js # Supabase client (env-driven, anon key only)
-    │   └── authService.js    # Auth actions + role resolution from profiles
+    │   ├── supabaseClient.js  # Supabase client (env-driven, anon key only)
+    │   ├── authService.js     # Auth actions + role resolution from profiles
+    │   └── complaintService.js# Day 4: category fetch + complaint submission
     ├── context/
-    │   └── AuthContext.jsx   # AuthProvider / useAuth (session, role, actions)
+    │   └── AuthContext.jsx    # AuthProvider / useAuth (session, role, actions)
     ├── components/
     │   ├── layout/
-    │   │   └── AppLayout.jsx # Shared role-aware layout (header/nav/footer)
-    │   ├── ProtectedRoute.jsx# Role-aware route guards (Protected + PublicOnly)
-    │   ├── LoadingScreen.jsx # Session-check loading state
+    │   │   └── AppLayout.jsx  # Shared role-aware layout (header/nav/footer)
+    │   ├── ProtectedRoute.jsx # Role-aware route guards (Protected + PublicOnly)
+    │   ├── LoadingScreen.jsx  # Session-check loading state
     │   └── PagePlaceholder.jsx
     └── pages/
         ├── LoginPage.jsx
@@ -179,6 +235,7 @@ Unknown routes redirect to `/login`.
         ├── ForgotPasswordPage.jsx
         ├── UpdatePasswordPage.jsx
         ├── StudentPage.jsx
+        ├── SubmitComplaintPage.jsx  # Day 4: complaint form + success screen
         ├── StaffPage.jsx
         └── AdminPage.jsx
 ```
