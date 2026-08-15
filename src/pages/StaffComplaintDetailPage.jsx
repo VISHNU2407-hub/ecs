@@ -45,7 +45,7 @@ function Field({ label, value }) {
  */
 export default function StaffComplaintDetailPage() {
   const { id } = useParams()
-  const { role } = useAuth()
+  const { role, user } = useAuth()
 
   const [complaint, setComplaint] = useState(null)
   const [history, setHistory] = useState([])
@@ -330,8 +330,9 @@ export default function StaffComplaintDetailPage() {
 
       {/* Day 7 — anonymous conversation with the student. Only safe fields
           are ever fetched or rendered; Realtime uses safe column selection
-          plus RLS, so staff never see student identity. */}
-      <ComplaintChat complaintId={id} viewerRole={role} />
+          plus RLS, so staff never see student identity. ownerId scopes only
+          the local "messages I sent" UI marker in sessionStorage. */}
+      <ComplaintChat complaintId={id} viewerRole={role} ownerId={user?.id} />
     </div>
   )
 }

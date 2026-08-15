@@ -7,6 +7,56 @@ import {
   sendComplaintMessage,
 } from '../lib/complaintService.js'
 
+// ---------------------------------------------------------------------------
+// Session-scoped ownership persistence (UI state only).
+//
+// The chat never reads sender_id — ownership of staff messages is decided by
+// which message ids THIS authenticated client created. Those ids are kept in
+// an in-memory Set for the live session AND persisted to sessionStorage so
+// ownership survives a refresh / remount / navigation away and back.
+//
+// SECURITY:
+//   * The stored VALUE is an array of message id strings ONLY. Never
+//     sender_id, student_id, email, name, user metadata, message bodies or
+//     auth tokens.
+//   * The storage KEY includes the authenticated user's id, so ids recorded
+//     by one user can never leak into another user's (or a logged-out)
+//     session. When the authenticated user changes, only their own key is
+//     read.
+//   * All access is wrapped in try/catch: if sessionStorage is unavailable
+//     or malformed, the chat falls back to the in-memory Set and works
+//     exactly as before.
+// ---------------------------------------------------------------------------
+
+function storageKey(ownerId, complaintId) {
+  return `cc:owned-msgs:${ownerId}:${complaintId}`
+}
+
+// Returns a Set of message ids (strings only). Empty on any problem.
+function readPersistedOwnIds(ownerId, complaintId) {
+  if (!ownerId || !complaintId) return new Set()
+  try {
+    const raw = sessionStorage.getItem(storageKey(ownerId, complaintId))
+    if (!raw) return new Set()
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((v) => typeof v === 'string' && v.length > 0))
+  } catch {
+    return new Set()
+  }
+}
+
+function persistOwnId(ownerId, complaintId, id) {
+  if (!ownerId || !complaintId || !id) return
+  try {
+    const ids = readPersistedOwnIds(ownerId, complaintId)
+    ids.add(id)
+    sessionStorage.setItem(storageKey(ownerId, complaintId), JSON.stringify([...ids]))
+  } catch {
+    // Storage unavailable — the in-memory Set still tracks this session.
+  }
+}
+
 /**
  * Day 7 — chat state for ONE complaint, shared by the student and staff
  * conversation UIs.
@@ -22,8 +72,13 @@ import {
  * - The channel is removed on unmount and when the complaint id changes
  *   (no duplicate subscriptions, no leaks).
  * - Sending goes through the safe INSERT path (complaint_id + body only).
+ * - ownMessageIds: ids of messages created by the CURRENT authenticated user
+ *   (`ownerId`) for this complaint, restored from sessionStorage on mount and
+ *   updated on every send. This is local UI state — never an identity field —
+ *   and lets the chat render "You (Role)" for the current user's own staff
+ *   messages even after a refresh.
  */
-export default function useComplaintChat(complaintId) {
+export default function useComplaintChat(complaintId, ownerId) {
   const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
@@ -37,6 +92,12 @@ export default function useComplaintChat(complaintId) {
   const sendingRef = useRef(false)
   const mountedRef = useRef(true)
   const [reloadKey, setReloadKey] = useState(0)
+  // Ids of messages THIS authenticated user created for this complaint —
+  // restored from sessionStorage, updated on send. Self-knowledge only; it
+  // never leaves the browser and never contains identity.
+  const [ownMessageIds, setOwnMessageIds] = useState(() =>
+    readPersistedOwnIds(ownerId, complaintId),
+  )
 
   useEffect(() => {
     mountedRef.current = true
@@ -57,6 +118,9 @@ export default function useComplaintChat(complaintId) {
   useEffect(() => {
     let cancelled = false
     idsRef.current = new Set()
+    // Restore this user's ownership ids for this complaint (empty when the
+    // user changed, logged out, or storage is unavailable).
+    setOwnMessageIds(readPersistedOwnIds(ownerId, complaintId))
     setMessages([])
     setLoadError('')
     setSendError('')
@@ -119,7 +183,7 @@ export default function useComplaintChat(complaintId) {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [complaintId, reloadKey])
+  }, [complaintId, ownerId, reloadKey])
 
   async function sendMessage(text) {
     setSendError('')
@@ -138,8 +202,12 @@ export default function useComplaintChat(complaintId) {
     setSending(true)
     try {
       const row = await sendComplaintMessage(complaintId, body)
-      // The Realtime event for this same row may also arrive — addMessage
-      // deduplicates by id, so it appears exactly once.
+      // Mark it as "mine": in memory AND sessionStorage (keyed by this user +
+      // complaint), so ownership survives a refresh/remount. The Realtime
+      // event for this same row may also arrive — addMessage deduplicates by
+      // id, so it appears exactly once.
+      persistOwnId(ownerId, complaintId, row.id)
+      setOwnMessageIds((prev) => new Set(prev).add(row.id))
       addMessage(row)
       return true
     } catch (err) {
@@ -159,6 +227,7 @@ export default function useComplaintChat(complaintId) {
     sending,
     sendError,
     realtimeStatus,
+    ownMessageIds,
     retryLoad: () => setReloadKey((k) => k + 1),
     sendMessage,
   }

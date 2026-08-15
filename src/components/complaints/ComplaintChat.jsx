@@ -16,22 +16,34 @@ function labelFor(senderRole) {
   return SENDER_LABELS[senderRole] ?? String(senderRole ?? 'Unknown')
 }
 
+// Subtle, lightweight neutral dot texture for the conversation background
+// (inline SVG data URI — no assets, no branding, no network request).
+const CHAT_PATTERN = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 26 26'%3E%3Ccircle cx='2' cy='2' r='1.2' fill='%2394a3b8' fill-opacity='0.16'/%3E%3C/svg%3E")`
+
 /**
  * Day 7 — anonymous two-way conversation for one complaint. Reused by the
- * student detail page and the staff complaint detail page.
+ * student detail page and the staff complaint detail page. WhatsApp-style:
+ * the current user's messages are right-aligned blue bubbles labeled "You"
+ * (or "You (Role)" for staff); the other participant's messages are
+ * left-aligned white bubbles labeled only by sender_role.
  *
- *   viewerRole  — the caller's app role ('student' | 'faculty' | 'admin' |
- *                 'committee'). Determines labels and bubble side:
- *                 - student viewer: their own messages = "You" (right, blue);
- *                   staff/committee messages labeled by role (left, gray).
- *                 - staff viewer: messages labeled purely by sender_role
- *                   (Student / Staff / Committee). Staff identity is never
- *                   shown — the database does not expose sender_id.
+ *   viewerRole — the caller's app role. "My message" is determined WITHOUT
+ *                any identity field:
+ *                - student viewer: every student-role message on their own
+ *                  complaint is theirs (RLS guarantees only the owner can be
+ *                  the student participant) → sender_role === 'student'.
+ *                - staff viewer: only messages whose id is in ownMessageIds
+ *                  (recorded locally when THIS authenticated user sent them,
+ *                  persisted per user+complaint in sessionStorage). Other
+ *                  staff messages stay anonymous ("Staff"), so no identity
+ *                  is ever exposed or inferred.
+ *   ownerId    — the authenticated user's id, used ONLY to scope the local
+ *                ownership storage key. Never sent anywhere.
  *
  * All messaging state (load, Realtime, dedupe, send) lives in
- * useComplaintChat; this component is presentational.
+ * useComplaintChat — untouched — this component is presentational only.
  */
-export default function ComplaintChat({ complaintId, viewerRole }) {
+export default function ComplaintChat({ complaintId, viewerRole, ownerId }) {
   const {
     messages,
     loading,
@@ -39,9 +51,10 @@ export default function ComplaintChat({ complaintId, viewerRole }) {
     sending,
     sendError,
     realtimeStatus,
+    ownMessageIds,
     retryLoad,
     sendMessage,
-  } = useComplaintChat(complaintId)
+  } = useComplaintChat(complaintId, ownerId)
 
   const listRef = useRef(null)
   const inputRef = useRef(null)
@@ -52,6 +65,18 @@ export default function ComplaintChat({ complaintId, viewerRole }) {
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [messages])
+
+  function isOwnMessage(message) {
+    return isStudentViewer
+      ? message.sender_role === 'student'
+      : ownMessageIds.has(message.id)
+  }
+
+  function ownLabel(message) {
+    if (isStudentViewer) return 'You'
+    // e.g. "You (Staff)", "You (Committee)" — role only, never identity.
+    return `You (${labelFor(message.sender_role)})`
+  }
 
   async function handleSubmit(event) {
     event.preventDefault()
@@ -101,9 +126,13 @@ export default function ComplaintChat({ complaintId, viewerRole }) {
         </div>
       ) : (
         <>
+          {/* WhatsApp-style conversation area */}
           <ul
             ref={listRef}
-            className="mt-4 max-h-80 space-y-3 overflow-y-auto rounded-md bg-gray-50 p-3"
+            role="log"
+            aria-label="Conversation messages"
+            className="mt-4 max-h-80 space-y-2.5 overflow-y-auto rounded-xl border border-gray-200 p-3 sm:p-4"
+            style={{ backgroundColor: '#f1f5f9', backgroundImage: CHAT_PATTERN }}
           >
             {messages.length === 0 ? (
               <li className="py-8 text-center text-sm text-gray-500">
@@ -111,33 +140,32 @@ export default function ComplaintChat({ complaintId, viewerRole }) {
               </li>
             ) : (
               messages.map((message) => {
-                const fromStudent = message.sender_role === 'student'
-                // Student messages sit on the right; staff/committee on the
-                // left. The student viewer labels their own messages "You".
-                const ownLabel =
-                  isStudentViewer && fromStudent
-                    ? 'You'
-                    : labelFor(message.sender_role)
+                const mine = isOwnMessage(message)
                 return (
                   <li
                     key={message.id}
-                    className={`flex flex-col ${fromStudent ? 'items-end' : 'items-start'}`}
+                    className={`flex flex-col ${mine ? 'items-end' : 'items-start'}`}
                   >
-                    <span className="text-xs font-medium text-gray-500">
-                      {ownLabel}
+                    <span className="px-1 text-[11px] font-medium text-gray-500">
+                      {mine ? ownLabel(message) : labelFor(message.sender_role)}
                     </span>
                     <div
-                      className={`mt-0.5 max-w-[85%] rounded-lg px-3 py-2 text-sm shadow-sm sm:max-w-[75%] ${
-                        fromStudent
-                          ? 'rounded-br-sm bg-blue-600 text-white'
-                          : 'rounded-bl-sm bg-white text-gray-900 ring-1 ring-gray-200'
+                      className={`mt-0.5 max-w-[80%] rounded-2xl px-3.5 py-2 text-sm shadow-sm sm:max-w-[70%] ${
+                        mine
+                          ? 'rounded-br-md bg-blue-600 text-white'
+                          : 'rounded-bl-md bg-white text-gray-900 ring-1 ring-gray-200'
                       }`}
                     >
                       <p className="whitespace-pre-line break-words">{message.body}</p>
+                      {/* Timestamp inside the bubble, bottom-right */}
+                      <span
+                        className={`mt-1 block text-right text-[10px] leading-none ${
+                          mine ? 'text-blue-200' : 'text-gray-400'
+                        }`}
+                      >
+                        {formatDateTime(message.created_at)}
+                      </span>
                     </div>
-                    <span className="mt-0.5 text-[11px] text-gray-400">
-                      {formatDateTime(message.created_at)}
-                    </span>
                   </li>
                 )
               })
@@ -150,6 +178,7 @@ export default function ComplaintChat({ complaintId, viewerRole }) {
             </p>
           )}
 
+          {/* Modern chat composer */}
           <form onSubmit={handleSubmit} className="mt-3 flex items-end gap-2">
             <div className="flex-1">
               <label htmlFor="chat-message" className="sr-only">
@@ -161,18 +190,27 @@ export default function ComplaintChat({ complaintId, viewerRole }) {
                 rows={2}
                 maxLength={MESSAGE_MAX_LENGTH}
                 placeholder="Type a message…"
-                className="block w-full resize-none rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none"
+                className="block w-full resize-none rounded-2xl border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
               />
-              <p className="mt-1 text-right text-[11px] text-gray-400">
-                Max {MESSAGE_MAX_LENGTH} characters
+              <p className="mt-1 pr-1 text-right text-[11px] text-gray-400">
+                {MESSAGE_MAX_LENGTH} characters max
               </p>
             </div>
             <button
               type="submit"
+              aria-label="Send message"
               disabled={sending}
-              className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-blue-600 text-white shadow-sm transition-colors hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {sending ? 'Sending…' : 'Send'}
+              <svg
+                className="h-5 w-5 translate-x-px"
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <path d="M3.4 20.4l17.45-7.48a1 1 0 0 0 0-1.84L3.4 3.6a.993.993 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z" />
+              </svg>
+              <span className="sr-only">{sending ? 'Sending…' : 'Send'}</span>
             </button>
           </form>
         </>

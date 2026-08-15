@@ -17,7 +17,7 @@ import { formatDateTime } from '../lib/format.js'
  */
 export default function StudentComplaintDetailPage() {
   const { id } = useParams()
-  const { role } = useAuth()
+  const { role, user } = useAuth()
 
   const [complaint, setComplaint] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -128,8 +128,10 @@ export default function StudentComplaintDetailPage() {
         </dl>
       </div>
 
-      {/* Anonymous conversation */}
-      <ComplaintChat complaintId={id} viewerRole={role} />
+      {/* Anonymous conversation. ownerId scopes only the local "messages I
+          sent" UI marker in sessionStorage (unused for students, whose own
+          messages are identified by sender_role on their own complaint). */}
+      <ComplaintChat complaintId={id} viewerRole={role} ownerId={user?.id} />
     </div>
   )
 }
