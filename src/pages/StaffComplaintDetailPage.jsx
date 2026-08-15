@@ -6,6 +6,8 @@ import {
   STATUS_LABELS,
   StatusBadge,
 } from '../components/complaints/Badges.jsx'
+import ComplaintChat from '../components/complaints/ComplaintChat.jsx'
+import { useAuth } from '../context/AuthContext.jsx'
 import {
   fetchComplaintStatusHistory,
   fetchStaffComplaintDetail,
@@ -43,6 +45,7 @@ function Field({ label, value }) {
  */
 export default function StaffComplaintDetailPage() {
   const { id } = useParams()
+  const { role } = useAuth()
 
   const [complaint, setComplaint] = useState(null)
   const [history, setHistory] = useState([])
@@ -324,6 +327,11 @@ export default function StaffComplaintDetailPage() {
           </ol>
         )}
       </div>
+
+      {/* Day 7 — anonymous conversation with the student. Only safe fields
+          are ever fetched or rendered; Realtime uses safe column selection
+          plus RLS, so staff never see student identity. */}
+      <ComplaintChat complaintId={id} viewerRole={role} />
     </div>
   )
 }

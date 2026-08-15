@@ -13,7 +13,9 @@ numbers; Day 5 adds the first real dashboards — the student dashboard
 (anonymous complaint list with status/category/priority/ticket filters over
 the identity-free staff view); Day 6 adds the complaint status flow — a staff
 complaint detail page with a database-enforced status control and a
-role-anonymous status-history timeline.
+role-anonymous status-history timeline; Day 7 adds the anonymous two-way
+conversation — a chat on every complaint (student and staff sides) powered by
+Supabase Realtime, with sender identity derived server-side and never exposed.
 
 ## Getting started
 
@@ -42,10 +44,11 @@ Run the migration files **in order** in the Supabase SQL editor (or via
 ```
 supabase/migrations/20260814000000_day3_database_security_foundation.sql  # Day 3 — schema, roles, security
 supabase/migrations/20260815000000_day6_status_flow.sql                  # Day 6 — status flow + history
+supabase/migrations/20260816000000_day7_anonymous_chat.sql               # Day 7 — chat validation + Realtime
 ```
 
-Both are written to be re-runnable, but re-running is not required. The Day 3
-migration is never modified — Day 6 only adds to it.
+All are written to be re-runnable, but re-running is not required. The Day 3
+migration is never modified — Days 6 and 7 only add to it.
 
 There are local verification harnesses that boot a throwaway PostgreSQL
 instance and run the migrations plus the security checks:
@@ -257,12 +260,63 @@ and no-op transitions, invalid enum rejection, sensitive/department
 restrictions, admin access, history visibility, no direct write path, and
 anon rejection.
 
-### Not implemented yet (Day 7+)
+### Anonymous chat + Realtime (Day 7)
 
-Anonymous chat UI, Supabase Realtime, notifications, escalation automation,
-identity-reveal UI, analytics, duplicate detection, public complaint board,
-admin/faculty account management, file upload UI, and category assignment
-UI. The schema is ready for these.
+Every complaint now has an anonymous two-way conversation between the student
+and the authorized staff:
+
+- **Student side** (`/student/complaints/:id`): the student opens any of
+their complaints from the dashboard and chats. Their own messages are
+labeled **You**; staff messages are labeled by role (Staff / Committee). No
+identity field is ever fetched or rendered.
+- **Staff side** (`/staff/complaints/:id`): a conversation section below the
+status control. Messages are labeled purely by `sender_role` (Student / Staff
+/ Committee) — staff identity is never shown either.
+- **Realtime**: new messages appear instantly in both browsers. The client
+subscribes to `postgres_changes` on `messages` filtered to the current
+complaint (`complaint_id=eq.…`) with an explicit safe column selection
+(`id, complaint_id, sender_role, body, created_at`). Supabase Realtime applies
+row-level RLS (unauthorized clients get no events) and only allows selecting
+columns the subscriber can read — `sender_id` is not selectable, so it can
+never appear in a payload. Channels are removed on unmount / complaint
+switch (no duplicate subscriptions, no leaks), and messages are deduplicated
+by stable id so the INSERT response and the Realtime event never show a
+message twice.
+- **Sending** goes through the existing Day 3 path: the client submits only
+`complaint_id` + `body`; the `messages_set_sender` trigger derives
+`sender_id` (auth.uid()) and `sender_role` server-side, and RLS blocks
+anyone not authorized for the complaint. The client cannot forge sender
+identity (no grants on those columns).
+- **Validation**: empty / whitespace-only and > 2000-character messages are
+rejected both in the UI and by a new Day 7 CHECK constraint on
+`messages.body`.
+- **No new tables, no RLS changes.** The Day 3 `messages` table, its
+`can_access_complaint()` policies and grants, and the identity-free
+`messages_staff_view` already satisfy the whole model. The Day 7 migration
+only adds the body CHECK constraint and adds `messages` to the
+`supabase_realtime` publication.
+
+Local verification:
+
+```bash
+node scripts/verify-day7.mjs
+```
+
+This boots a throwaway PostgreSQL instance, applies the Day 3 + 6 + 7
+migrations, and runs 36 checks: server-derived sender identity, per-role read
+visibility with no identity fields, sender-role/sender-id forgery rejection,
+unauthorized inserts, empty/whitespace/oversized rejection, anon rejection,
+complaint-scoped conversations, unchanged Day 6 status behavior, and the
+Realtime preconditions (RLS row-level via `can_access_complaint`, `sender_id`
+not selectable, identity-free view). Realtime itself requires a live Supabase
+project (it cannot run inside embedded-postgres) — see the manual test below.
+
+### Not implemented yet (Day 8+)
+
+Notifications, push notifications, escalation automation, identity-reveal UI,
+analytics, duplicate detection, public complaint board, admin/faculty account
+management, file upload UI, and category assignment UI. The schema is ready
+for these.
 
 ## Authentication (Day 2)
 
@@ -303,6 +357,7 @@ Unknown roles fall back to `student`.
 | `/update-password`| Set a new password (recovery link lands here) | Recovery session |
 | `/student`        | Student dashboard (own complaints + stats) | Signed-in students |
 | `/student/complaints/new` | Submit a complaint form        | Signed-in students    |
+| `/student/complaints/:id` | Student complaint detail + anonymous chat | Signed-in students |
 | `/staff`          | Staff dashboard (anonymous complaints + filters) | Faculty (admin/committee for now) |
 | `/staff/complaints/:id` | Staff complaint detail (status control + history) | Faculty (admin/committee for now) |
 | `/admin`          | Admin dashboard placeholder (admins currently route to `/staff`) | Admin |
@@ -322,7 +377,8 @@ Unknown routes redirect to `/login`.
 │   ├── verify-day3.mjs       # Local Postgres verification harness (Day 3)
 │   ├── verify-day4.mjs       # Local Postgres verification harness (Day 4)
 │   ├── verify-day5.mjs       # Local Postgres verification harness (Day 5)
-│   └── verify-day6.mjs       # Local Postgres verification harness (Day 6)
+│   ├── verify-day6.mjs       # Local Postgres verification harness (Day 6)
+│   └── verify-day7.mjs       # Local Postgres verification harness (Day 7)
 └── src/
     ├── main.jsx              # React root + BrowserRouter
     ├── App.jsx               # Route definitions + AuthProvider
@@ -330,15 +386,18 @@ Unknown routes redirect to `/login`.
     ├── lib/
     │   ├── supabaseClient.js  # Supabase client (env-driven, anon key only)
     │   ├── authService.js     # Auth actions + role resolution from profiles
-    │   ├── complaintService.js# Day 4+5: category fetch, submission, dashboard queries
+    │   ├── complaintService.js# Day 4-7: categories, submission, dashboards, status, chat
     │   └── format.js          # Day 5: shared date formatting
     ├── context/
     │   └── AuthContext.jsx    # AuthProvider / useAuth (session, role, actions)
+    ├── hooks/
+    │   └── useComplaintChat.js# Day 7: chat state (load, Realtime, dedupe, send)
     ├── components/
     │   ├── layout/
     │   │   └── AppLayout.jsx  # Shared role-aware layout (header/nav/footer)
     │   ├── complaints/
-    │   │   └── Badges.jsx     # Day 5: status/priority/sensitive badges
+    │   │   ├── Badges.jsx     # Day 5: status/priority/sensitive badges
+    │   │   └── ComplaintChat.jsx  # Day 7: anonymous chat UI (student + staff)
     │   ├── ProtectedRoute.jsx # Role-aware route guards (Protected + PublicOnly)
     │   ├── LoadingScreen.jsx  # Session-check loading state
     │   └── PagePlaceholder.jsx
@@ -348,8 +407,9 @@ Unknown routes redirect to `/login`.
         ├── ForgotPasswordPage.jsx
         ├── UpdatePasswordPage.jsx
         ├── StudentPage.jsx    # Day 5: student dashboard
+        ├── StudentComplaintDetailPage.jsx  # Day 7: student detail + chat
         ├── SubmitComplaintPage.jsx  # Day 4: complaint form + success screen
         ├── StaffPage.jsx      # Day 5: staff dashboard (anonymous + filters)
-        ├── StaffComplaintDetailPage.jsx  # Day 6: detail + status control + history
+        ├── StaffComplaintDetailPage.jsx  # Day 6/7: detail + status + history + chat
         └── AdminPage.jsx
 ```

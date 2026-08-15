@@ -8,6 +8,7 @@ import RegisterPage from './pages/RegisterPage.jsx'
 import ForgotPasswordPage from './pages/ForgotPasswordPage.jsx'
 import UpdatePasswordPage from './pages/UpdatePasswordPage.jsx'
 import StudentPage from './pages/StudentPage.jsx'
+import StudentComplaintDetailPage from './pages/StudentComplaintDetailPage.jsx'
 import SubmitComplaintPage from './pages/SubmitComplaintPage.jsx'
 import StaffPage from './pages/StaffPage.jsx'
 import StaffComplaintDetailPage from './pages/StaffComplaintDetailPage.jsx'
@@ -68,6 +69,17 @@ export default function App() {
             <ProtectedRoute role="student">
               <AppLayout role="student">
                 <SubmitComplaintPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        {/* Day 7 — student complaint detail + anonymous conversation. */}
+        <Route
+          path="/student/complaints/:id"
+          element={
+            <ProtectedRoute role="student">
+              <AppLayout role="student">
+                <StudentComplaintDetailPage />
               </AppLayout>
             </ProtectedRoute>
           }

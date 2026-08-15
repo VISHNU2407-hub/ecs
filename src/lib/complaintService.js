@@ -144,6 +144,37 @@ export async function fetchStaffComplaints() {
   return data ?? []
 }
 
+/**
+ * Day 7 — fetches ONE complaint for the student detail page. The query
+ * filters by the complaint id on the base table; RLS
+ * (complaints_select_student: student_id = auth.uid()) restricts it to the
+ * signed-in student's own complaints. Returns the same safe fields as the
+ * student dashboard plus the category name, or null when the complaint does
+ * not exist or is not the caller's.
+ */
+export async function fetchStudentComplaintDetail(complaintId) {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .from('complaints')
+    .select(
+      'id, ticket_number, category_id, priority, status, created_at, updated_at, complaint_categories(name)',
+    )
+    .eq('id', complaintId)
+    .maybeSingle()
+  if (error) throw error
+  if (!data) return null
+  return {
+    id: data.id,
+    ticket_number: data.ticket_number,
+    category_id: data.category_id,
+    category: data.complaint_categories?.name ?? null,
+    priority: data.priority,
+    status: data.status,
+    created_at: data.created_at,
+    updated_at: data.updated_at,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Day 6 — Status flow
 // ---------------------------------------------------------------------------
@@ -220,6 +251,57 @@ export async function updateComplaintStatus(complaintId, newStatus) {
       p_complaint_id: complaintId,
       p_new_status: newStatus,
     })
+    .single()
+  if (error) throw error
+  return data
+}
+
+// ---------------------------------------------------------------------------
+// Day 7 — Anonymous complaint chat + Realtime
+// ---------------------------------------------------------------------------
+
+// Server-enforced maximum message length (mirrors the Day 7 CHECK constraint
+// on messages.body). Also used by the client for the character counter.
+export const MESSAGE_MAX_LENGTH = 2000
+
+// The ONLY columns the chat ever touches. sender_id / student_id are not in
+// this list AND are not selectable by `authenticated` (Day 3 column grants),
+// so neither REST responses nor Realtime payloads can ever contain them.
+export const CHAT_SELECT_COLUMNS = ['id', 'complaint_id', 'sender_role', 'body', 'created_at']
+
+/**
+ * Day 7 — loads a complaint's conversation through the identity-free
+ * messages_staff_view. Row visibility is enforced by RLS
+ * (can_access_complaint): students see only their own complaints' messages,
+ * faculty only non-sensitive, committee only sensitive, admin all. Only safe
+ * fields are selected — never sender_id.
+ */
+export async function fetchComplaintMessages(complaintId) {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .from('messages_staff_view')
+    .select('id, complaint_id, sender_role, body, created_at')
+    .eq('complaint_id', complaintId)
+    .order('created_at', { ascending: true })
+  if (error) throw error
+  return data ?? []
+}
+
+/**
+ * Day 7 — sends a message. The client submits ONLY complaint_id + body; the
+ * Day 3 messages_set_sender trigger derives sender_id (auth.uid()) and
+ * sender_role (the caller's app role) server-side, and RLS
+ * (messages_insert_accessible via can_access_complaint) blocks anyone who is
+ * not authorized for the complaint. The INSERT grant excludes sender_id and
+ * sender_role, so they cannot be forged. Returns the created row's safe
+ * fields (id, complaint_id, sender_role, body, created_at).
+ */
+export async function sendComplaintMessage(complaintId, body) {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .from('messages')
+    .insert({ complaint_id: complaintId, body })
+    .select('id, complaint_id, sender_role, body, created_at')
     .single()
   if (error) throw error
   return data
