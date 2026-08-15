@@ -424,3 +424,79 @@ export async function fetchMyMessageDeletions(complaintId) {
   if (error) throw error
   return (data ?? []).map((row) => row.message_id)
 }
+
+// ---------------------------------------------------------------------------
+// Day 9 — Resolution confirmation, Reopen & Automatic escalation
+//
+// Closing a resolved complaint and reopening it are STUDENT actions. They go
+// exclusively through the Day 9 SECURITY DEFINER RPCs (confirm_complaint_
+// resolution / reopen_complaint), which verify INSIDE the database that the
+// caller is authenticated, has role 'student', OWNS the complaint
+// (student_id = auth.uid() — the user id is never accepted from the client),
+// and that the complaint is currently 'resolved'. History is recorded with
+// changed_by_role = 'student'. There is still no direct UPDATE grant on
+// public.complaints.
+// ---------------------------------------------------------------------------
+
+/**
+ * Day 9 — student confirms their OWN resolved complaint is truly fixed
+ * (resolved -> closed). Returns the updated safe row:
+ *   { ticket_number, status: 'closed', updated_at }
+ */
+export async function confirmComplaintResolution(complaintId) {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .rpc('confirm_complaint_resolution', { p_complaint_id: complaintId })
+    .single()
+  if (error) throw error
+  return data
+}
+
+/**
+ * Day 9 — student reopens their OWN resolved complaint (resolved -> reopened)
+ * so staff pick it up again in the active workflow. Returns the updated safe
+ * row: { ticket_number, status: 'reopened', updated_at }.
+ */
+export async function reopenComplaint(complaintId) {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .rpc('reopen_complaint', { p_complaint_id: complaintId })
+    .single()
+  if (error) throw error
+  return data
+}
+
+/**
+ * Day 9 — minimal per-complaint Realtime subscription for STATUS changes on
+ * the `complaints` table (UPDATE events only, filtered to this complaint).
+ * Row-level RLS decides which clients receive events at all (student -> own
+ * complaints, staff -> authorized rows) and Realtime only delivers columns
+ * the subscriber can SELECT — student_id is not selectable by
+ * `authenticated`, so it can never appear in a payload. This is a focused
+ * per-complaint channel (no global subscriptions); it is removed on unmount.
+ *
+ * onStatusChange receives { id, status, updated_at } for each UPDATE event.
+ * Returns an unsubscribe function.
+ */
+export function subscribeComplaintStatus(complaintId, onStatusChange) {
+  if (!supabase) return () => {}
+  const channel = supabase
+    .channel(`complaint-status:${complaintId}`)
+    .on(
+      'postgres_changes',
+      {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'complaints',
+        filter: `id=eq.${complaintId}`,
+        select: ['id', 'status', 'updated_at'],
+      },
+      (payload) => {
+        const { id, status, updated_at } = payload.new ?? {}
+        if (!id) return
+        onStatusChange({ id, status, updated_at })
+      },
+    )
+    .subscribe()
+  return () => supabase.removeChannel(channel)
+}

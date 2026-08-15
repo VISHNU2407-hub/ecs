@@ -21,7 +21,14 @@ me, and delete for everyone (soft delete) — enforced by SECURITY DEFINER
 RPCs so the database remains the only authority on message ownership;
 Day 8B adds a conversation-level "Delete conversation" action that hides the
 conversation for the current user only, using a per-user timestamp cutoff so
-new messages become visible again (the complaint and messages are untouched).
+new messages become visible again (the complaint and messages are untouched);
+Day 9 adds the resolution workflow — the student confirms their resolved
+complaint (resolved → closed) or reopens it (resolved → reopened) through
+secure student-only RPCs — plus automatic escalation: complaints stuck in
+submitted/under_review past a database-configured threshold are escalated by a
+server-side function scheduled with pg_cron, recorded in the status history as
+role `system` with no identity, and surfaced to admin/staff through the same
+role-based anonymous view.
 
 ## Getting started
 
@@ -53,10 +60,11 @@ supabase/migrations/20260815000000_day6_status_flow.sql                  # Day 6
 supabase/migrations/20260816000000_day7_anonymous_chat.sql               # Day 7 — chat validation + Realtime
 supabase/migrations/20260817000000_day8_message_controls.sql             # Day 8A — edit / delete for me / delete for everyone
 supabase/migrations/20260818000000_day8b_delete_conversation_for_me.sql  # Day 8B — delete conversation for me
+supabase/migrations/20260819000000_day9_resolution_escalation.sql        # Day 9 — resolution confirmation, reopen, escalation
 ```
 
 All are written to be re-runnable, but re-running is not required. The Day 3
-migration is never modified — Days 6, 7, 8A and 8B only add to it.
+migration is never modified — Days 6, 7, 8A, 8B and 9 only add to it.
 
 There are local verification harnesses that boot a throwaway PostgreSQL
 instance and run the migrations plus the security checks:
@@ -413,12 +421,104 @@ rejection, old-replay exclusion, Day 8A/Day 7/Day 6 regressions, identity
 hiding (including `conversation_user_state.user_id` in grants), isolation and
 Realtime preconditions.
 
-### Not implemented yet (Day 9+)
+### Resolution, Reopen & Escalation (Day 9)
 
-Notifications, push notifications, escalation automation, identity-reveal UI,
-analytics, duplicate detection, public complaint board, admin/faculty account
-management, file upload UI, and category assignment UI. The schema is ready
-for these.
+The status flow now closes the loop with the student, and stale complaints
+escalate automatically — all enforced server-side.
+
+**Resolution confirmation (student)**
+
+- When staff set a complaint to **Resolved**, the student detail page shows a
+  confirmation panel: *"Is your issue resolved?"* with `[Yes, close
+  complaint]` and `[No, reopen complaint]`.
+- Both actions go through new SECURITY DEFINER RPCs —
+  `confirm_complaint_resolution(complaint_id)` (resolved → closed) and
+  `reopen_complaint(complaint_id)` (resolved → reopened) — the only student
+  write paths for status. Each verifies INSIDE the database: authenticated
+  caller, app role `student`, ownership (`complaint.student_id =
+  auth.uid()` — the user id is never accepted from the client), current
+  status `resolved`, and the Day 6 transition map. A student cannot close or
+  reopen another student's complaint, cannot close a non-resolved complaint,
+  and staff/admin/committee cannot use the student paths.
+- History records each action with `changed_by_role = 'student'` (a role,
+  never an identity). Closing hides the panel (Status: Closed); reopening
+  shows *"Your complaint has been reopened and returned to the handling
+  workflow"* (Status: Reopened) and staff see it again in their active
+  workflow — `reopened → under_review / in_progress / resolved / escalated`
+  via the existing Day 6 rules.
+
+**Automatic escalation**
+
+- The threshold lives in the database, in the new `system_settings` table
+  (`escalation_threshold`, default `48 hours`) — never hardcoded in React,
+  never in localStorage. The table has RLS with no policies and no client
+  grants; only the escalation function can read it.
+- `escalate_stale_complaints()` is a SECURITY DEFINER function that reads the
+  threshold and escalates ONLY complaints that are `submitted` **or**
+  `under_review` **and** whose `updated_at` (a database/server timestamp,
+  never browser time) is older than the threshold — i.e. no meaningful staff
+  status action within the window. `assigned` / `in_progress` / `resolved` /
+  `reopened` / `closed` are never auto-escalated.
+- Each escalation is an atomic UPDATE plus a `complaint_status_history` row
+  with `previous_status`, `new_status = 'escalated'`, `changed_at`, and
+  `changed_by_role = 'system'` — a new `app_role` enum value used ONLY for
+  automated history. No profile row, no fake admin identity, no student
+  identity is created anywhere.
+- **Scheduling**: the migration auto-creates a pg_cron job
+  `day9-escalate-stale-complaints` (every 15 minutes) when pg_cron is
+  available. In Supabase, enable pg_cron in **Dashboard → Database →
+  Extensions** and re-run the migration (the block is guarded and idempotent).
+  Without pg_cron, run `select * from public.escalate_stale_complaints()` on
+  your own schedule. No client role can invoke the function — it is not
+  granted to `authenticated`, so it cannot be used to escalate arbitrary
+  complaints.
+- **Manual escalation** is unchanged: the Day 6 `update_complaint_status`
+  RPC already allows staff/admin → `escalated` from `submitted`,
+  `under_review`, `assigned`, `in_progress` and `reopened` with full
+  authorization and a history row — nothing new was added to avoid
+  duplicating the existing status control.
+
+**Escalation visibility**
+
+- The identity-free `complaints_staff_view` now includes a derived
+  `is_escalated` flag, so admin can identify ticket number, category,
+  department, priority, status, escalation state and created/updated
+  timestamps for escalated complaints. Visibility follows the existing RLS
+  exactly: admin sees all, faculty only non-sensitive escalated, committee
+  only sensitive escalated, students only their own. No identity fields are
+  added anywhere.
+- The staff detail page shows an *"escalated and waiting for attention"*
+  notice, and the history timeline now labels `student` and `system` roles.
+
+**Realtime**
+
+- `complaints` was added to the `supabase_realtime` publication (guarded),
+  and both detail pages subscribe to a minimal per-complaint UPDATE channel
+  (`id=eq.…`) so status changes — staff resolve, student close/reopen,
+  automatic escalation — appear without a refresh. RLS decides who receives
+  events, and `student_id` is not selectable by `authenticated`, so it can
+  never appear in a payload. The existing chat Realtime implementation is
+  untouched.
+
+Local verification:
+
+```bash
+node scripts/verify-day9.mjs
+```
+
+This boots a throwaway PostgreSQL instance, applies all six migrations, and
+runs 81 checks covering every numbered Day 9 requirement (resolution,
+reopen, escalation, visibility, security, invalid transitions, anon
+blocking) plus Day 3–8B regressions. Realtime itself and pg_cron cannot run
+inside embedded-postgres; the harness verifies their preconditions (RLS,
+publication membership, `student_id` unselectable) and exercises
+`escalate_stale_complaints()` directly.
+
+### Not implemented yet (Day 10+)
+
+Notifications, push notifications, identity-reveal UI, analytics, duplicate
+detection, public complaint board, admin/faculty account management, file
+upload UI, and category assignment UI. The schema is ready for these.
 
 ## Authentication (Day 2)
 
@@ -480,7 +580,10 @@ Unknown routes redirect to `/login`.
 │   ├── verify-day4.mjs       # Local Postgres verification harness (Day 4)
 │   ├── verify-day5.mjs       # Local Postgres verification harness (Day 5)
 │   ├── verify-day6.mjs       # Local Postgres verification harness (Day 6)
-│   └── verify-day7.mjs       # Local Postgres verification harness (Day 7)
+│   ├── verify-day7.mjs       # Local Postgres verification harness (Day 7)
+│   ├── verify-day8.mjs       # Local Postgres verification harness (Day 8A)
+│   ├── verify-day8b.mjs      # Local Postgres verification harness (Day 8B)
+│   └── verify-day9.mjs       # Local Postgres verification harness (Day 9)
 └── src/
     ├── main.jsx              # React root + BrowserRouter
     ├── App.jsx               # Route definitions + AuthProvider

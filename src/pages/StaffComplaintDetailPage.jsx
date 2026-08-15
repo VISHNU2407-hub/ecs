@@ -12,16 +12,21 @@ import {
   fetchComplaintStatusHistory,
   fetchStaffComplaintDetail,
   getNextStatuses,
+  subscribeComplaintStatus,
   updateComplaintStatus,
 } from '../lib/complaintService.js'
 import { formatDateTime } from '../lib/format.js'
 
 // Role labels for the timeline's "changed by" line. A ROLE is shown, never an
 // identity — staff/student names and ids are never fetched or rendered.
+// Day 9 adds 'student' (student confirm/reopen actions) and 'system'
+// (automatic escalation) — both are roles, never identities.
 const ROLE_LABELS = {
   faculty: 'Faculty',
   admin: 'Admin',
   committee: 'Committee',
+  student: 'Student',
+  system: 'System',
 }
 
 function Field({ label, value }) {
@@ -109,6 +114,25 @@ export default function StaffComplaintDetailPage() {
   useEffect(() => {
     loadDetail()
     // Load once per complaint id; the retry button re-runs loadDetail.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id])
+
+  // Day 9 — minimal per-complaint Realtime subscription: status changes (by
+  // the student, another staff member, or the automatic escalation) appear
+  // without a refresh. RLS decides whether this staff member receives the
+  // event at all; student_id can never appear in the payload.
+  useEffect(() => {
+    if (!id) return undefined
+    const unsubscribe = subscribeComplaintStatus(id, (next) => {
+      if (!mountedRef.current) return
+      setComplaint((prev) =>
+        prev
+          ? { ...prev, status: next.status, updated_at: next.updated_at }
+          : prev,
+      )
+      loadHistory()
+    })
+    return unsubscribe
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
@@ -231,6 +255,21 @@ export default function StaffComplaintDetailPage() {
           </p>
         </div>
       </div>
+
+      {/* Day 9 — escalated notice. Drawn attention to complaints the
+          automatic escalation (or a staff member) escalated, so admin/staff
+          pick them up. No identity is involved — the status alone drives
+          this. */}
+      {complaint.status === 'escalated' && (
+        <div
+          role="status"
+          className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800 shadow-sm"
+        >
+          This complaint has been{' '}
+          <span className="font-medium">escalated</span> and is waiting for
+          attention. Review it and update its status to continue the workflow.
+        </div>
+      )}
 
       {/* Status control */}
       <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm sm:p-6">
