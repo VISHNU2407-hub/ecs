@@ -280,7 +280,7 @@ try {
   await asUser(client, U.faculty, async () => {
     const { rows } = await client.query(
       `select
-         ticket_number, category, department, priority, status, handler_type,
+         id, ticket_number, category, department, priority, status, handler_type,
          is_sensitive, created_at, updated_at
        from public.complaints_staff_view
        order by created_at desc`,
@@ -299,7 +299,7 @@ try {
   check(
     'staff response fields are exactly the safe dashboard fields',
     JSON.stringify(staffCols.sort()) ===
-      JSON.stringify(['ticket_number', 'category', 'department', 'priority', 'status', 'handler_type', 'is_sensitive', 'created_at', 'updated_at'].sort()),
+      JSON.stringify(['id', 'ticket_number', 'category', 'department', 'priority', 'status', 'handler_type', 'is_sensitive', 'created_at', 'updated_at'].sort()),
     staffCols.join(','),
   )
   // The SensitiveBadge field must be present for every row.

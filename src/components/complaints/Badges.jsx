@@ -16,7 +16,7 @@ const STATUS_STYLES = {
   closed: 'bg-gray-100 text-gray-600 ring-gray-200',
 }
 
-const STATUS_LABELS = {
+export const STATUS_LABELS = {
   submitted: 'Submitted',
   under_review: 'Under Review',
   assigned: 'Assigned',

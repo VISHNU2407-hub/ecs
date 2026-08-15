@@ -11,7 +11,9 @@ validated description and priority, and database-generated CMP-XXXX ticket
 numbers; Day 5 adds the first real dashboards — the student dashboard
 (summary stats + the student's own complaints) and the staff dashboard
 (anonymous complaint list with status/category/priority/ticket filters over
-the identity-free staff view).
+the identity-free staff view); Day 6 adds the complaint status flow — a staff
+complaint detail page with a database-enforced status control and a
+role-anonymous status-history timeline.
 
 ## Getting started
 
@@ -30,25 +32,28 @@ npm run dev
 
 Open http://localhost:5173 — you'll be redirected to `/login`.
 
-## Database (Day 3)
+## Database (Day 3 + Day 6)
 
-### Applying the migration
+### Applying the migrations
 
-The entire Day 3 schema lives in one migration file:
+Run the migration files **in order** in the Supabase SQL editor (or via
+`supabase db push`):
 
 ```
-supabase/migrations/20260814000000_day3_database_security_foundation.sql
+supabase/migrations/20260814000000_day3_database_security_foundation.sql  # Day 3 — schema, roles, security
+supabase/migrations/20260815000000_day6_status_flow.sql                  # Day 6 — status flow + history
 ```
 
-Run it **once** in the Supabase SQL editor (or via `supabase db push`). It is
-written to be re-runnable, but re-running is not required.
+Both are written to be re-runnable, but re-running is not required. The Day 3
+migration is never modified — Day 6 only adds to it.
 
-There is a local verification harness that boots a throwaway PostgreSQL
-instance and runs the migration plus the security checks:
+There are local verification harnesses that boot a throwaway PostgreSQL
+instance and run the migrations plus the security checks:
 
 ```bash
 npm install -D embedded-postgres pg   # already a devDependency
 node scripts/verify-day3.mjs
+node scripts/verify-day6.mjs
 ```
 
 ### Tables
@@ -197,12 +202,67 @@ category-name resolution, the staff view response (no identity columns),
 role-based row visibility on the view (faculty/committee/admin), anon
 rejection, and the staff filter logic.
 
-### Not implemented yet (Day 6+)
+### Status flow (Day 6)
 
-Complaint detail views, anonymous chat UI, Supabase Realtime, notifications,
-escalation jobs, analytics, duplicate detection, public complaint board,
-identity-reveal UI, admin/faculty account management, file upload UI, and
-category assignment UI. The schema is ready for these.
+Staff can open any complaint from the staff dashboard and manage its status;
+the change is recorded in a role-anonymous history timeline and the student
+dashboard reflects the new status automatically.
+
+- **Staff detail page** (`/staff/complaints/:id`): shows only safe fields
+  (ticket, category, department, description, priority, status, handler type,
+  sensitive/standard, created/updated) fetched from `complaints_staff_view` —
+  no student identity, and RLS hides complaints a role cannot see (a direct
+  URL to a hidden complaint shows "not found or no access").
+- **Status updates** go exclusively through the SECURITY DEFINER RPC
+  `public.update_complaint_status(complaint_id, new_status)`. There is no
+  direct UPDATE grant on `public.complaints`, so the RPC is the only write
+  path. Inside, the database enforces:
+  - role: only `faculty` / `committee` / `admin` (students are rejected);
+  - sensitivity: faculty → non-sensitive only, committee → sensitive only,
+    admin → all (mirrors the staff view);
+  - department: a caller whose profile has a `department_id` may only update
+    complaints of that department (no-op in the ECS pilot, where
+    `profiles.department_id` is NULL for everyone);
+  - transitions: a strict map (no random jumping, no self-transitions, no
+    invalid enum values).
+- **Status transitions** (the only allowed moves):
+  `submitted → under_review, escalated`;
+  `under_review → assigned, in_progress, escalated, resolved`;
+  `assigned → in_progress, escalated, resolved`;
+  `in_progress → resolved, escalated`;
+  `resolved → closed, reopened`;
+  `reopened → under_review, in_progress, resolved, escalated`;
+  `escalated → under_review, in_progress, resolved`;
+  `closed → reopened`.
+- **`complaint_status_history`** records `complaint_id`, `previous_status`,
+  `new_status`, `changed_at`, and `changed_by_role` — a ROLE
+  (faculty/admin/committee), never an identity. It is read-only over RLS
+  using the existing `can_access_complaint()` rule and has no identity
+  columns.
+- **Security boundary is the database.** The React UI only hides/enables
+  options for convenience; the RPC enforces authorization and the transition
+  map server-side, so a crafted API call cannot bypass them.
+
+Local verification:
+
+```bash
+node scripts/verify-day6.mjs
+```
+
+This boots a throwaway PostgreSQL instance, applies the Day 3 migration
+unchanged + the Day 6 migration, and runs 44 checks: student isolation and
+status reflection, student update rejection, staff detail reads without
+identity fields, per-role visibility, valid updates with history, invalid
+and no-op transitions, invalid enum rejection, sensitive/department
+restrictions, admin access, history visibility, no direct write path, and
+anon rejection.
+
+### Not implemented yet (Day 7+)
+
+Anonymous chat UI, Supabase Realtime, notifications, escalation automation,
+identity-reveal UI, analytics, duplicate detection, public complaint board,
+admin/faculty account management, file upload UI, and category assignment
+UI. The schema is ready for these.
 
 ## Authentication (Day 2)
 
@@ -244,6 +304,7 @@ Unknown roles fall back to `student`.
 | `/student`        | Student dashboard (own complaints + stats) | Signed-in students |
 | `/student/complaints/new` | Submit a complaint form        | Signed-in students    |
 | `/staff`          | Staff dashboard (anonymous complaints + filters) | Faculty (admin/committee for now) |
+| `/staff/complaints/:id` | Staff complaint detail (status control + history) | Faculty (admin/committee for now) |
 | `/admin`          | Admin dashboard placeholder (admins currently route to `/staff`) | Admin |
 
 Unknown routes redirect to `/login`.
@@ -260,7 +321,8 @@ Unknown routes redirect to `/login`.
 ├── scripts/
 │   ├── verify-day3.mjs       # Local Postgres verification harness (Day 3)
 │   ├── verify-day4.mjs       # Local Postgres verification harness (Day 4)
-│   └── verify-day5.mjs       # Local Postgres verification harness (Day 5)
+│   ├── verify-day5.mjs       # Local Postgres verification harness (Day 5)
+│   └── verify-day6.mjs       # Local Postgres verification harness (Day 6)
 └── src/
     ├── main.jsx              # React root + BrowserRouter
     ├── App.jsx               # Route definitions + AuthProvider
@@ -288,5 +350,6 @@ Unknown routes redirect to `/login`.
         ├── StudentPage.jsx    # Day 5: student dashboard
         ├── SubmitComplaintPage.jsx  # Day 4: complaint form + success screen
         ├── StaffPage.jsx      # Day 5: staff dashboard (anonymous + filters)
+        ├── StaffComplaintDetailPage.jsx  # Day 6: detail + status control + history
         └── AdminPage.jsx
 ```

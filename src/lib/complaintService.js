@@ -137,9 +137,90 @@ export async function fetchStaffComplaints() {
   const { data, error } = await client
     .from('complaints_staff_view')
     .select(
-      'ticket_number, category, department, priority, status, handler_type, is_sensitive, created_at, updated_at',
+      'id, ticket_number, category, department, priority, status, handler_type, is_sensitive, created_at, updated_at',
     )
     .order('created_at', { ascending: false })
   if (error) throw error
   return data ?? []
+}
+
+// ---------------------------------------------------------------------------
+// Day 6 — Status flow
+// ---------------------------------------------------------------------------
+
+// The only allowed status transitions, mirrored from the Day 6 migration's
+// public.can_transition_status(). Used ONLY to drive which options the UI
+// offers; the database RPC remains the authoritative validator and will
+// reject anything this map gets wrong.
+export const STATUS_TRANSITIONS = {
+  submitted: ['under_review', 'escalated'],
+  under_review: ['assigned', 'in_progress', 'escalated', 'resolved'],
+  assigned: ['in_progress', 'escalated', 'resolved'],
+  in_progress: ['resolved', 'escalated'],
+  resolved: ['closed', 'reopened'],
+  reopened: ['under_review', 'in_progress', 'resolved', 'escalated'],
+  escalated: ['under_review', 'in_progress', 'resolved'],
+  closed: ['reopened'],
+}
+
+export function getNextStatuses(status) {
+  return STATUS_TRANSITIONS[status] ?? []
+}
+
+/**
+ * Day 6 — fetches ONE complaint for the staff detail page, through the same
+ * safe view the staff dashboard uses (public.complaints_staff_view). RLS
+ * decides whether this staff member may see it (faculty -> non-sensitive,
+ * committee -> sensitive, admin -> all); a complaint that does not exist or
+ * is not visible returns null — the page treats both the same way, so it
+ * never leaks whether a hidden complaint exists.
+ */
+export async function fetchStaffComplaintDetail(complaintId) {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .from('complaints_staff_view')
+    .select(
+      'id, ticket_number, category, department, description, priority, status, handler_type, is_sensitive, created_at, updated_at',
+    )
+    .eq('id', complaintId)
+    .maybeSingle()
+  if (error) throw error
+  return data
+}
+
+/**
+ * Day 6 — fetches the status-history timeline for a complaint. Read access
+ * follows the same RLS visibility rule as the complaint itself, so a caller
+ * can only ever see history for complaints they are allowed to see. History
+ * contains only roles and timestamps — never any identity.
+ */
+export async function fetchComplaintStatusHistory(complaintId) {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .from('complaint_status_history')
+    .select('id, previous_status, new_status, changed_by_role, changed_at')
+    .eq('complaint_id', complaintId)
+    .order('changed_at', { ascending: true })
+  if (error) throw error
+  return data ?? []
+}
+
+/**
+ * Day 6 — the ONLY status-write path. Calls the SECURITY DEFINER RPC
+ * public.update_complaint_status, which enforces role / sensitivity /
+ * department authorization and the transition map inside the database — the
+ * UI cannot bypass it, and the client has no direct UPDATE grant on
+ * public.complaints. Returns the updated safe row:
+ *   { ticket_number, status, updated_at }
+ */
+export async function updateComplaintStatus(complaintId, newStatus) {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .rpc('update_complaint_status', {
+      p_complaint_id: complaintId,
+      p_new_status: newStatus,
+    })
+    .single()
+  if (error) throw error
+  return data
 }

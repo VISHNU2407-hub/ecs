@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { PriorityBadge, SensitiveBadge, StatusBadge } from '../components/complaints/Badges.jsx'
 import { fetchStaffComplaints } from '../lib/complaintService.js'
 import { formatDateTime } from '../lib/format.js'
@@ -256,38 +257,44 @@ export default function StaffPage() {
         {!loading && !error && filteredComplaints.length > 0 && (
           <ul className="space-y-3">
             {filteredComplaints.map((complaint) => (
-              <li key={complaint.ticket_number}>
-                <article className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="font-mono text-sm font-semibold text-gray-900">
-                        {complaint.ticket_number}
-                      </p>
-                      <p className="mt-0.5 text-sm text-gray-600">
-                        {complaint.category ?? '—'}
-                        {complaint.department ? ` · ${complaint.department}` : ''}
-                        {complaint.handler_type
-                          ? ` · ${complaint.handler_type} handling`
-                          : ''}
-                      </p>
+              <li key={complaint.id}>
+                <Link
+                  to={`/staff/complaints/${complaint.id}`}
+                  className="block rounded-lg border border-gray-200 bg-white p-4 shadow-sm transition-colors hover:border-blue-300 hover:shadow-md sm:p-5"
+                >
+                  <article>
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="font-mono text-sm font-semibold text-gray-900">
+                          {complaint.ticket_number}
+                        </p>
+                        <p className="mt-0.5 text-sm text-gray-600">
+                          {complaint.category ?? '—'}
+                          {complaint.department ? ` · ${complaint.department}` : ''}
+                          {complaint.handler_type
+                            ? ` · ${complaint.handler_type} handling`
+                            : ''}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <PriorityBadge priority={complaint.priority} />
+                        <StatusBadge status={complaint.status} />
+                        <SensitiveBadge isSensitive={complaint.is_sensitive} />
+                      </div>
                     </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <PriorityBadge priority={complaint.priority} />
-                      <StatusBadge status={complaint.status} />
-                      <SensitiveBadge isSensitive={complaint.is_sensitive} />
-                    </div>
-                  </div>
-                  <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500">
-                    <div>
-                      <dt className="sr-only">Created date</dt>
-                      <dd>Created: {formatDateTime(complaint.created_at)}</dd>
-                    </div>
-                    <div>
-                      <dt className="sr-only">Updated date</dt>
-                      <dd>Updated: {formatDateTime(complaint.updated_at)}</dd>
-                    </div>
-                  </dl>
-                </article>
+                    <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500">
+                      <div>
+                        <dt className="sr-only">Created date</dt>
+                        <dd>Created: {formatDateTime(complaint.created_at)}</dd>
+                      </div>
+                      <div>
+                        <dt className="sr-only">Updated date</dt>
+                        <dd>Updated: {formatDateTime(complaint.updated_at)}</dd>
+                      </div>
+                    </dl>
+                    <p className="mt-3 text-xs font-medium text-blue-600">View details →</p>
+                  </article>
+                </Link>
               </li>
             ))}
           </ul>

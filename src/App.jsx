@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import AppLayout from './components/layout/AppLayout.jsx'
+import ErrorBoundary from './components/ErrorBoundary.jsx'
 import ProtectedRoute, { PublicOnlyRoute } from './components/ProtectedRoute.jsx'
 import { AuthProvider } from './context/AuthContext.jsx'
 import LoginPage from './pages/LoginPage.jsx'
@@ -9,12 +10,17 @@ import UpdatePasswordPage from './pages/UpdatePasswordPage.jsx'
 import StudentPage from './pages/StudentPage.jsx'
 import SubmitComplaintPage from './pages/SubmitComplaintPage.jsx'
 import StaffPage from './pages/StaffPage.jsx'
+import StaffComplaintDetailPage from './pages/StaffComplaintDetailPage.jsx'
 import AdminPage from './pages/AdminPage.jsx'
 
 export default function App() {
   return (
     <AuthProvider>
-      <Routes>
+      {/* An unexpected render error anywhere shows a visible error card (via
+          ErrorBoundary) instead of a blank page. It never changes routing or
+          security behavior. */}
+      <ErrorBoundary>
+        <Routes>
         <Route path="/" element={<Navigate to="/login" replace />} />
 
         {/* Public auth pages. Signed-in users are redirected to their dashboard. */}
@@ -76,6 +82,19 @@ export default function App() {
             </ProtectedRoute>
           }
         />
+        {/* Day 6 — staff complaint detail with status control + history.
+            Read access and status changes are enforced by the database
+            (complaints_staff_view RLS + the update_complaint_status RPC). */}
+        <Route
+          path="/staff/complaints/:id"
+          element={
+            <ProtectedRoute role="staff">
+              <AppLayout role="staff">
+                <StaffComplaintDetailPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
         <Route
           path="/admin"
           element={
@@ -89,7 +108,8 @@ export default function App() {
 
         {/* Unknown routes fall back to the login page. */}
         <Route path="*" element={<Navigate to="/login" replace />} />
-      </Routes>
+        </Routes>
+      </ErrorBoundary>
     </AuthProvider>
   )
 }
