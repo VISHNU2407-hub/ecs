@@ -12,6 +12,7 @@ import StudentComplaintDetailPage from './pages/StudentComplaintDetailPage.jsx'
 import SubmitComplaintPage from './pages/SubmitComplaintPage.jsx'
 import StaffPage from './pages/StaffPage.jsx'
 import StaffComplaintDetailPage from './pages/StaffComplaintDetailPage.jsx'
+import FacultyAssignmentsPage from './pages/FacultyAssignmentsPage.jsx'
 import AdminPage from './pages/AdminPage.jsx'
 
 export default function App() {
@@ -103,6 +104,22 @@ export default function App() {
             <ProtectedRoute role="staff">
               <AppLayout role="staff">
                 <StaffComplaintDetailPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        {/* Day 9B — admin-only faculty category assignment management. The
+            route guard passes any staff-role user (admin/faculty/committee
+            all map to /staff); the page itself requires the DB role 'admin'
+            and the RPCs enforce admin server-side, so a non-admin visiting
+            the URL sees an access-denied state and can never change or read
+            assignments. */}
+        <Route
+          path="/staff/faculty-assignments"
+          element={
+            <ProtectedRoute role="staff">
+              <AppLayout role="staff">
+                <FacultyAssignmentsPage />
               </AppLayout>
             </ProtectedRoute>
           }

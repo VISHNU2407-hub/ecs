@@ -500,3 +500,77 @@ export function subscribeComplaintStatus(complaintId, onStatusChange) {
     .subscribe()
   return () => supabase.removeChannel(channel)
 }
+
+// ---------------------------------------------------------------------------
+// Day 9B — Faculty category assignment (admin management UI)
+//
+// The security boundary is the DATABASE: faculty visibility is narrowed by
+// RLS + can_access_complaint() + update_complaint_status() to the caller's
+// department and assigned categories (see the Day 9B migration). The admin
+// UI below is the only mechanism that CHANGES assignments, and it goes
+// exclusively through two SECURITY DEFINER RPCs that verify the caller is
+// admin (public.profiles.role) and validate the target faculty + categories
+// server-side. Students cannot create assignments, faculty cannot change
+// their own, and the client is never trusted with role or department.
+// ---------------------------------------------------------------------------
+
+/**
+ * Day 9B — admin-only list of faculty + their category assignments, from the
+ * SECURITY DEFINER RPC list_faculty_category_assignments(). Returns one row
+ * per (faculty, assignment); faculty with no assignments appear once with
+ * category null. Only faculty accounts are returned — never students.
+ */
+export async function fetchFacultyCategoryAssignments() {
+  const client = ensureSupabase()
+  const { data, error } = await client.rpc('list_faculty_category_assignments')
+  if (error) throw error
+  return data ?? []
+}
+
+/**
+ * Day 9B — admin sets a faculty member's assigned categories (atomic replace
+ * inside the SECURITY DEFINER RPC set_faculty_category_assignments). The RPC
+ * verifies the caller is admin, the target is a faculty member with a
+ * department, and every category is non-sensitive and mapped to the target's
+ * department — nothing is written if any input is invalid. Returns the
+ * target's current assignment rows.
+ */
+export async function setFacultyCategoryAssignments(targetFacultyId, categoryIds) {
+  const client = ensureSupabase()
+  const { data, error } = await client.rpc('set_faculty_category_assignments', {
+    p_target_faculty_id: targetFacultyId,
+    p_category_ids: categoryIds,
+  })
+  if (error) throw error
+  return data ?? []
+}
+
+/**
+ * Day 9B — loads the category -> department routing table so the admin UI can
+ * render only the checkboxes for categories that actually belong to each
+ * faculty member's department. Reference data, readable by any signed-in
+ * user (Day 3 grant); the RPC re-validates the mapping server-side.
+ */
+export async function fetchCategoryDepartmentMap() {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .from('category_department_map')
+    .select('category_id, department_id')
+  if (error) throw error
+  return data ?? []
+}
+
+/**
+ * Day 9B — loads all categories WITH their sensitivity flag so the admin UI
+ * can render every checkbox and mark sensitive categories as not assignable
+ * to faculty (the RPC rejects them unconditionally).
+ */
+export async function fetchCategoriesWithSensitivity() {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .from('complaint_categories')
+    .select('id, name, is_sensitive')
+    .order('name', { ascending: true })
+  if (error) throw error
+  return data ?? []
+}

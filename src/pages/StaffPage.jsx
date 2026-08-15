@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { PriorityBadge, SensitiveBadge, StatusBadge } from '../components/complaints/Badges.jsx'
+import { useAuth } from '../context/AuthContext.jsx'
 import { fetchStaffComplaints } from '../lib/complaintService.js'
 import { formatDateTime } from '../lib/format.js'
 
@@ -57,6 +58,8 @@ function SelectFilter({ id, label, value, options, onChange }) {
  * complaint fields; there are no identity-based filters.
  */
 export default function StaffPage() {
+  const { role } = useAuth()
+
   const [complaints, setComplaints] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -135,11 +138,24 @@ export default function StaffPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-xl font-semibold text-gray-900">Staff Dashboard</h1>
-        <p className="mt-1 text-sm text-gray-600">
-          ECS complaints — reviewed anonymously. No student identity is ever shown.
-        </p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold text-gray-900">Staff Dashboard</h1>
+          <p className="mt-1 text-sm text-gray-600">
+            ECS complaints — reviewed anonymously. No student identity is ever shown.
+          </p>
+        </div>
+        {/* Day 9B — admin-only management link. The assignments page and its
+            RPCs enforce the admin role server-side; this link is convenience
+            for the admin (who routes here for now). */}
+        {role === 'admin' && (
+          <Link
+            to="/staff/faculty-assignments"
+            className="inline-block rounded-md border border-blue-300 bg-white px-4 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
+          >
+            Faculty Assignments
+          </Link>
+        )}
       </div>
 
       {/* Filters — safe complaint fields only */}

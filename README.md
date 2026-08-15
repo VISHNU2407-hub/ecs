@@ -28,7 +28,12 @@ secure student-only RPCs — plus automatic escalation: complaints stuck in
 submitted/under_review past a database-configured threshold are escalated by a
 server-side function scheduled with pg_cron, recorded in the status history as
 role `system` with no identity, and surfaced to admin/staff through the same
-role-based anonymous view.
+role-based anonymous view; Day 9B adds faculty-level category assignment —
+an admin-only mechanism that narrows each faculty member's visibility to
+their own department and the complaint categories assigned to them, enforced
+entirely by RLS and the existing SECURITY DEFINER helpers (a Labs-assigned
+faculty member sees ECS Labs complaints and nothing else, on every read
+path: dashboard, detail, chat, history and status updates).
 
 ## Getting started
 
@@ -61,10 +66,11 @@ supabase/migrations/20260816000000_day7_anonymous_chat.sql               # Day 7
 supabase/migrations/20260817000000_day8_message_controls.sql             # Day 8A — edit / delete for me / delete for everyone
 supabase/migrations/20260818000000_day8b_delete_conversation_for_me.sql  # Day 8B — delete conversation for me
 supabase/migrations/20260819000000_day9_resolution_escalation.sql        # Day 9 — resolution confirmation, reopen, escalation
+supabase/migrations/20260820000000_day9b_faculty_category_assignment.sql # Day 9B — faculty category assignment & routing
 ```
 
 All are written to be re-runnable, but re-running is not required. The Day 3
-migration is never modified — Days 6, 7, 8A, 8B and 9 only add to it.
+migration is never modified — Days 6, 7, 8A, 8B, 9 and 9B only add to it.
 
 There are local verification harnesses that boot a throwaway PostgreSQL
 instance and run the migrations plus the security checks:
@@ -86,6 +92,8 @@ node scripts/verify-day6.mjs
 | `complaints`                | Anonymous complaints; `ticket_number` unique (`CMP-XXXX`)                |
 | `messages`                  | Complaint messages; `sender_id` stored for audit, never exposed          |
 | `identity_reveal_requests`  | Student-controlled consent to reveal identity (no UI yet)                |
+| `faculty_category_assignments` | Admin-assigned complaint categories per faculty member (Day 9B)      |
+| `system_settings`           | Database configuration (Day 9 escalation threshold)                     |
 
 ### Roles & enums
 
@@ -514,11 +522,61 @@ inside embedded-postgres; the harness verifies their preconditions (RLS,
 publication membership, `student_id` unselectable) and exercises
 `escalate_stale_complaints()` directly.
 
+### Faculty category assignment & routing (Day 9B)
+
+A faculty member no longer sees every non-sensitive ECS complaint — they see
+only complaints from **their own department** in the **categories an admin
+has assigned them** (non-sensitive, department-handled complaints only).
+This is enforced **entirely at the database level**; the frontend never
+filters for security.
+
+- **`faculty_category_assignments`** — one row per (faculty, category) with
+  `UNIQUE(faculty_id, category_id)`. Faculty may SELECT their own rows; only
+  admin can manage them; students have no access. The client is granted
+  SELECT only — the admin RPCs are the only writer.
+- **`faculty_can_access_complaint(complaint_id)`** — the single authoritative
+  faculty rule (SECURITY DEFINER): caller role = faculty, complaint is
+  non-sensitive, `handler_type = 'department'`, caller has a department,
+  `caller.department_id = complaint.department_id`, and an assignment exists
+  matching `complaint.category_id`. A sensitive complaint can NEVER become
+  visible through an assignment (is_sensitive = false is unconditional), and
+  committee routing stays controlled by `handler_type = 'committee'`.
+- **Everything routes through the rule**: `can_access_complaint()` (chat,
+  history, message access), the base `complaints` RLS policy (dashboard and
+  detail reads), and `update_complaint_status()` (status updates). The
+  `complaints_staff_view` stays identity-free and security-invoker, so it
+  automatically returns only authorized rows.
+- **Admin management** — `set_faculty_category_assignments(target_faculty_id,
+  category_ids)` and `list_faculty_category_assignments()`, both SECURITY
+  DEFINER with the role checked inside from `public.profiles.role`. The set
+  RPC validates: caller is admin, target is a faculty account with a
+  department, every category is non-sensitive and mapped to the target's
+  department (via `category_department_map`), then atomically replaces the
+  assignments (nothing is written if any input is invalid). The admin UI
+  lives at **/staff/faculty-assignments** (linked from the staff dashboard
+  for admins); it lists faculty only — no student identity anywhere — and
+  renders per-faculty category checkboxes with sensitive categories disabled.
+- No new departments, categories or fake users were added — the MVP stays
+  ECS; the fixture CSE department exists only inside the verification
+  harness to prove cross-department rejection.
+
+Local verification:
+
+```bash
+node scripts/verify-day9b.mjs
+```
+
+This boots a throwaway PostgreSQL instance, applies all migrations, and runs
+82 checks: the assignment model, admin-only management, faculty visibility
+per category/department, role isolation, identity hiding (sender_id /
+student_id / email / name), base-table RLS (no frontend filtering), direct
+bypass rejection, anon blocking, and Day 3–9 regressions.
+
 ### Not implemented yet (Day 10+)
 
 Notifications, push notifications, identity-reveal UI, analytics, duplicate
 detection, public complaint board, admin/faculty account management, file
-upload UI, and category assignment UI. The schema is ready for these.
+upload UI, and a full admin dashboard. The schema is ready for these.
 
 ## Authentication (Day 2)
 
@@ -563,6 +621,7 @@ Unknown roles fall back to `student`.
 | `/staff`          | Staff dashboard (anonymous complaints + filters) | Faculty (admin/committee for now) |
 | `/staff/complaints/:id` | Staff complaint detail (status control + history) | Faculty (admin/committee for now) |
 | `/admin`          | Admin dashboard placeholder (admins currently route to `/staff`) | Admin |
+| `/staff/faculty-assignments` | Admin-only faculty category assignment management (Day 9B) | Admin (page self-checks; RPCs enforce server-side) |
 
 Unknown routes redirect to `/login`.
 
@@ -583,7 +642,8 @@ Unknown routes redirect to `/login`.
 │   ├── verify-day7.mjs       # Local Postgres verification harness (Day 7)
 │   ├── verify-day8.mjs       # Local Postgres verification harness (Day 8A)
 │   ├── verify-day8b.mjs      # Local Postgres verification harness (Day 8B)
-│   └── verify-day9.mjs       # Local Postgres verification harness (Day 9)
+│   ├── verify-day9.mjs       # Local Postgres verification harness (Day 9)
+│   └── verify-day9b.mjs      # Local Postgres verification harness (Day 9B)
 └── src/
     ├── main.jsx              # React root + BrowserRouter
     ├── App.jsx               # Route definitions + AuthProvider
@@ -616,5 +676,6 @@ Unknown routes redirect to `/login`.
         ├── SubmitComplaintPage.jsx  # Day 4: complaint form + success screen
         ├── StaffPage.jsx      # Day 5: staff dashboard (anonymous + filters)
         ├── StaffComplaintDetailPage.jsx  # Day 6/7: detail + status + history + chat
+        ├── FacultyAssignmentsPage.jsx    # Day 9B: admin faculty category assignments
         └── AdminPage.jsx
 ```
