@@ -18,7 +18,10 @@ conversation — a chat on every complaint (student and staff sides) powered by
 Supabase Realtime, with sender identity derived server-side and never exposed;
 Day 8A adds WhatsApp-style message controls to that chat — edit, delete for
 me, and delete for everyone (soft delete) — enforced by SECURITY DEFINER
-RPCs so the database remains the only authority on message ownership.
+RPCs so the database remains the only authority on message ownership;
+Day 8B adds a conversation-level "Delete conversation" action that hides the
+conversation for the current user only, using a per-user timestamp cutoff so
+new messages become visible again (the complaint and messages are untouched).
 
 ## Getting started
 
@@ -37,7 +40,7 @@ npm run dev
 
 Open http://localhost:5173 — you'll be redirected to `/login`.
 
-## Database (Day 3 + Day 6 + Day 7 + Day 8A)
+## Database (Day 3 + Day 6 + Day 7 + Day 8A + Day 8B)
 
 ### Applying the migrations
 
@@ -49,10 +52,11 @@ supabase/migrations/20260814000000_day3_database_security_foundation.sql  # Day 
 supabase/migrations/20260815000000_day6_status_flow.sql                  # Day 6 — status flow + history
 supabase/migrations/20260816000000_day7_anonymous_chat.sql               # Day 7 — chat validation + Realtime
 supabase/migrations/20260817000000_day8_message_controls.sql             # Day 8A — edit / delete for me / delete for everyone
+supabase/migrations/20260818000000_day8b_delete_conversation_for_me.sql  # Day 8B — delete conversation for me
 ```
 
 All are written to be re-runnable, but re-running is not required. The Day 3
-migration is never modified — Days 6, 7 and 8A only add to it.
+migration is never modified — Days 6, 7, 8A and 8B only add to it.
 
 There are local verification harnesses that boot a throwaway PostgreSQL
 instance and run the migrations plus the security checks:
@@ -366,12 +370,55 @@ rejection, direct UPDATE/DELETE/INSERT bypass rejection, identity-column
 hiding, complaint-access and sensitive restrictions, unchanged Day 7 sending
 and Day 6 status behavior, and Realtime preconditions.
 
-### Not implemented yet (Day 8B+)
+### Delete conversation for me (Day 8B)
 
-Delete conversation for me (Day 8B), notifications, push notifications,
-escalation automation, identity-reveal UI, analytics, duplicate detection,
-public complaint board, admin/faculty account management, file upload UI,
-and category assignment UI. The schema is ready for these.
+The chat header now has its own ⋮ menu with **Copy link** and **Delete
+conversation**. Deleting hides the conversation for the current user only,
+WhatsApp-style:
+
+- **Timestamp cutoff, not a flag**: a per-user, per-complaint row in the new
+  `conversation_user_state` table records `deleted_before = now()`. Message
+  reads filter to `created_at > deleted_before`, so messages that existed
+  before the deletion stay hidden while messages created after it become
+  visible again (a permanent boolean would wrongly hide everything forever).
+- **The complaint and messages are never touched** — the dashboard still
+  lists the complaint, and the other participant still sees the full
+  conversation. Each participant's cutoff is independent.
+- **RPC-only write**: `delete_complaint_conversation_for_me(complaint_id)` is
+  a SECURITY DEFINER RPC (the only write path — no INSERT/UPDATE grant on
+  the table). It verifies authentication + complaint access via the existing
+  `can_access_complaint()` model, derives `user_id` from `auth.uid()` (never
+  accepted from the client) and upserts `deleted_before = now()`. RLS on the
+  table is self-scoped (`user_id = auth.uid()`); the client is granted
+  SELECT only, and `user_id` is excluded from that grant entirely.
+- **Realtime stays active**: after deletion the visible list is cleared but
+  the subscription continues — events for messages at or before the cutoff
+  are ignored (old messages can never reappear through a replay), while new
+  post-cutoff messages appear immediately in both directions.
+- **Layered on Day 8A**: delete for me, delete for everyone and edits keep
+  working alongside the cutoff, and delete-for-everyone always takes
+  precedence.
+
+Local verification:
+
+```bash
+node scripts/verify-day8b.mjs
+```
+
+This boots a throwaway PostgreSQL instance, applies the Day 3 + 6 + 7 + 8A +
+8B migrations, and runs 55 checks: per-role conversation deletion, cutoff
+hides only pre-cutoff messages per user, post-cutoff visibility, sending after
+deletion, auth.uid()-derived ownership, no direct table bypass, anon
+rejection, old-replay exclusion, Day 8A/Day 7/Day 6 regressions, identity
+hiding (including `conversation_user_state.user_id` in grants), isolation and
+Realtime preconditions.
+
+### Not implemented yet (Day 9+)
+
+Notifications, push notifications, escalation automation, identity-reveal UI,
+analytics, duplicate detection, public complaint board, admin/faculty account
+management, file upload UI, and category assignment UI. The schema is ready
+for these.
 
 ## Authentication (Day 2)
 

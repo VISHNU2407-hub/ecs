@@ -69,6 +69,7 @@ export default function ComplaintChat({ complaintId, viewerRole, ownerId }) {
     realtimeStatus,
     ownMessageIds,
     hiddenMessageIds,
+    deletingConversation,
     actioningId,
     actionError,
     retryLoad,
@@ -76,9 +77,14 @@ export default function ComplaintChat({ complaintId, viewerRole, ownerId }) {
     editMessage,
     deleteForEveryone,
     deleteForMe,
+    deleteConversation,
   } = useComplaintChat(complaintId, ownerId)
 
   const [menuOpenId, setMenuOpenId] = useState(null)
+  // Day 8B — conversation-level menu (Copy link / Delete conversation).
+  const [convMenuOpen, setConvMenuOpen] = useState(false)
+  const [confirmConversation, setConfirmConversation] = useState(false)
+  const [copiedLink, setCopiedLink] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [editValue, setEditValue] = useState('')
   // { kind: 'me' | 'everyone', messageId } | null
@@ -95,17 +101,18 @@ export default function ComplaintChat({ complaintId, viewerRole, ownerId }) {
     if (el) el.scrollTop = el.scrollHeight
   }, [messages])
 
-  // Close the open menu on any outside pointer interaction (no hover needed —
-  // mobile friendly; the menu itself stops propagation so its own taps stay
-  // open until an action runs).
+  // Close the open menus on any outside pointer interaction (no hover needed
+  // — mobile friendly; the menus stop propagation so their own taps stay open
+  // until an action runs).
   useEffect(() => {
-    if (!menuOpenId) return
+    if (!menuOpenId && !convMenuOpen) return
     function close() {
       setMenuOpenId(null)
+      setConvMenuOpen(false)
     }
     document.addEventListener('pointerdown', close)
     return () => document.removeEventListener('pointerdown', close)
-  }, [menuOpenId])
+  }, [menuOpenId, convMenuOpen])
 
   // Day 8A: delete-for-everyone takes precedence over delete-for-me, so a
   // message hidden by the caller is filtered out UNLESS it was also deleted
@@ -179,6 +186,43 @@ export default function ComplaintChat({ complaintId, viewerRole, ownerId }) {
     if (!ok) setEditingId(null)
   }
 
+  // Day 8B — copy the conversation's URL (student vs staff page).
+  async function copyConversationLink() {
+    const path =
+      viewerRole === 'student'
+        ? `/student/complaints/${complaintId}`
+        : `/staff/complaints/${complaintId}`
+    const url = `${window.location.origin}${path}`
+    try {
+      await navigator.clipboard.writeText(url)
+    } catch {
+      const ta = document.createElement('textarea')
+      ta.value = url
+      ta.setAttribute('readonly', '')
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      try {
+        document.execCommand('copy')
+      } catch {
+        // Clipboard unavailable.
+      }
+      document.body.removeChild(ta)
+    }
+    setConvMenuOpen(false)
+    setCopiedLink(true)
+    window.setTimeout(() => setCopiedLink(false), 1500)
+  }
+
+  // Day 8B — confirm and run the delete-conversation RPC.
+  async function handleConfirmDeleteConversation() {
+    const ok = await deleteConversation()
+    setConfirmConversation(false)
+    setConvMenuOpen(false)
+    if (!ok) setEditingId(null)
+  }
+
   async function handleSubmit(event) {
     event.preventDefault()
     const input = inputRef.current
@@ -188,10 +232,59 @@ export default function ComplaintChat({ complaintId, viewerRole, ownerId }) {
 
   return (
     <section className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm sm:p-6">
-      <h2 className="text-base font-semibold text-gray-900">Conversation</h2>
-      <p className="mt-1 text-xs text-gray-500">
-        Messages stay anonymous — no student identity is ever shown.
-      </p>
+      {/* Day 8B — conversation-level header with its own action menu */}
+      <div className="relative flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-base font-semibold text-gray-900">Conversation</h2>
+          <p className="mt-1 text-xs text-gray-500">
+            Messages stay anonymous — no student identity is ever shown.
+          </p>
+        </div>
+        <button
+          type="button"
+          aria-label="Conversation options"
+          aria-haspopup="menu"
+          aria-expanded={convMenuOpen}
+          onClick={(e) => {
+            e.stopPropagation()
+            setMenuOpenId(null)
+            setConvMenuOpen((cur) => !cur)
+          }}
+          className="rounded-full p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600"
+        >
+          <DotsIcon />
+        </button>
+        {convMenuOpen && (
+          <ul
+            role="menu"
+            aria-label="Conversation actions"
+            onPointerDown={(e) => e.stopPropagation()}
+            className="absolute right-0 top-9 z-20 w-48 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
+          >
+            <li role="menuitem">
+              <button
+                type="button"
+                onClick={copyConversationLink}
+                className="flex w-full items-center gap-2 px-3.5 py-2 text-left text-sm text-gray-700 hover:bg-gray-50"
+              >
+                {copiedLink ? 'Link copied ✓' : 'Copy link'}
+              </button>
+            </li>
+            <li role="menuitem">
+              <button
+                type="button"
+                onClick={() => {
+                  setConvMenuOpen(false)
+                  setConfirmConversation(true)
+                }}
+                className="flex w-full items-center gap-2 px-3.5 py-2 text-left text-sm text-red-600 hover:bg-red-50"
+              >
+                Delete conversation
+              </button>
+            </li>
+          </ul>
+        )}
+      </div>
 
       {realtimeStatus === 'error' || realtimeStatus === 'disabled' ? (
         <p className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">
@@ -237,7 +330,8 @@ export default function ComplaintChat({ complaintId, viewerRole, ownerId }) {
           >
             {visibleMessages.length === 0 ? (
               <li className="py-8 text-center text-sm text-gray-500">
-                No messages yet. Start the conversation.
+                No messages yet. You can start a new conversation by sending a
+                message.
               </li>
             ) : (
               visibleMessages.map((message) => {
@@ -468,6 +562,47 @@ export default function ComplaintChat({ complaintId, viewerRole, ownerId }) {
             </button>
           </form>
         </>
+      )}
+
+      {/* Day 8B — delete-conversation confirmation dialog (mobile friendly) */}
+      {confirmConversation && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="conversation-delete-confirm-title"
+        >
+          <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-xl">
+            <h3
+              id="conversation-delete-confirm-title"
+              className="text-base font-semibold text-gray-900"
+            >
+              Delete conversation?
+            </h3>
+            <p className="mt-1 text-sm text-gray-500">
+              This will remove the conversation from your view. It won't delete
+              the complaint or messages for other participants.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmConversation(false)}
+                disabled={deletingConversation}
+                className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingConversation}
+                onClick={handleConfirmDeleteConversation}
+                className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {deletingConversation ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Confirmation dialog (mobile friendly) */}

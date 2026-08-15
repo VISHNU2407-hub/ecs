@@ -5,8 +5,10 @@ import {
   MESSAGE_MAX_LENGTH,
   deleteComplaintMessageForEveryone,
   deleteComplaintMessageForMe,
+  deleteConversationForMe,
   editComplaintMessage,
   fetchComplaintMessages,
+  fetchConversationState,
   fetchMyMessageDeletions,
   sendComplaintMessage,
 } from '../lib/complaintService.js'
@@ -61,9 +63,17 @@ function persistOwnId(ownerId, complaintId, id) {
   }
 }
 
+// Day 8B — a message passes the conversation cutoff when it was created after
+// the user's "delete conversation" timestamp. Realtime events for older
+// messages are ignored (they were never part of the visible conversation).
+function passesCutoff(message, cutoff) {
+  if (!cutoff || !message?.created_at) return true
+  return new Date(message.created_at).getTime() > new Date(cutoff).getTime()
+}
+
 /**
- * Day 7 + Day 8A — chat state for ONE complaint, shared by the student and
- * staff conversation UIs.
+ * Day 7 + Day 8A + Day 8B — chat state for ONE complaint, shared by the
+ * student and staff conversation UIs.
  *
  * Day 7 (unchanged behavior):
  * - Initial load through messages_staff_view (RLS decides visibility).
@@ -72,31 +82,36 @@ function persistOwnId(ownerId, complaintId, id) {
  *   columns. Row-level RLS decides which clients receive events at all, and
  *   Realtime only allows selecting columns the subscriber can read — so
  *   sender_id / student identity can never appear in a payload.
- * - Messages are deduplicated by stable id, so a row delivered by both the
- *   INSERT response and a Realtime event appears exactly once.
- * - The channel is removed on unmount and when the complaint id changes
- *   (no duplicate subscriptions, no leaks).
- * - Sending goes through the safe INSERT path (complaint_id + body only).
+ * - Messages are deduplicated by stable id (INSERT response + Realtime event
+ *   appear exactly once). The channel is removed on unmount and when the
+ *   complaint id changes. Sending goes through the safe INSERT path
+ *   (complaint_id + body only).
  * - ownMessageIds: ids of messages created by the CURRENT authenticated user
  *   (`ownerId`) for this complaint, restored from sessionStorage on mount and
- *   updated on every send. This is local UI state — never an identity field —
- *   and lets the chat render "You (Role)" for the current user's own staff
- *   messages even after a refresh.
+ *   updated on every send. Local UI state — never an identity field.
  *
  * Day 8A (additions):
  * - The Realtime subscription also receives UPDATE events (edited body,
- *   edited_at, is_deleted, deleted_at) with the same complaint filter and
- *   safe column selection; updates replace the message in place (stable id,
- *   same dedupe guarantees).
- * - hiddenMessageIds: ids the CURRENT user has "deleted for me". Restored on
- *   load via the caller's own message_user_deletions records (RLS scopes them
- *   to the caller), updated when delete-for-me succeeds. Local UI state only.
+ *   edited_at, is_deleted, deleted_at); updates replace the message in place
+ *   by stable id.
+ * - hiddenMessageIds: ids the CURRENT user has "deleted for me", restored on
+ *   load from the caller's own message_user_deletions records.
  * - editMessage / deleteForEveryone / deleteForMe call the Day 8 SECURITY
- *   DEFINER RPCs — the only write paths. Ownership + access are enforced
- *   server-side (auth.uid() = messages.sender_id); this hook never sends
- *   sender_id / sender_role / user_id.
- * - actioningId / actionError track a single in-flight action so the UI can
- *   disable controls and prevent duplicate requests.
+ *   DEFINER RPCs — the only write paths; ownership + access are enforced
+ *   server-side (auth.uid() = messages.sender_id).
+ *
+ * Day 8B (additions):
+ * - deletedBefore: the CURRENT user's "delete conversation for me" cutoff
+ *   (their own conversation_user_state row). On load the state is fetched
+ *   first and the message fetch filters to created_at > cutoff; Realtime
+ *   INSERT/UPDATE events are ignored when created_at <= cutoff, so old
+ *   messages can never reappear through a replay, while messages created
+ *   after the cutoff display normally.
+ * - deleteConversation(): calls the Day 8B SECURITY DEFINER RPC (auth +
+ *   complaint access verified inside; user_id derived from auth.uid()),
+ *   records the returned cutoff, and clears the visible conversation. The
+ *   Realtime subscription stays active; new post-cutoff messages flow in.
+ *   The complaint and the messages themselves are never touched.
  */
 export default function useComplaintChat(complaintId, ownerId) {
   const [messages, setMessages] = useState([])
@@ -108,9 +123,13 @@ export default function useComplaintChat(complaintId, ownerId) {
   const [realtimeStatus, setRealtimeStatus] = useState(supabase ? 'connecting' : 'disabled')
   // Day 8A: ids this user has hidden with "delete for me" (restored on load).
   const [hiddenMessageIds, setHiddenMessageIds] = useState(() => new Set())
+  // Day 8B: this user's conversation cutoff (ISO string or null).
+  const [deletedBefore, setDeletedBefore] = useState(null)
+  // Day 8B: true while the "delete conversation" RPC is in flight.
+  const [deletingConversation, setDeletingConversation] = useState(false)
   // Day 8A: the message id currently being edited/deleted (in-flight guard).
   const [actioningId, setActioningId] = useState(null)
-  // Day 8A: last action failure message ('' = no error).
+  // Last action failure message ('' = no error).
   const [actionError, setActionError] = useState('')
 
   const idsRef = useRef(new Set())
@@ -118,6 +137,9 @@ export default function useComplaintChat(complaintId, ownerId) {
   const sendingRef = useRef(false)
   const actioningRef = useRef(false)
   const mountedRef = useRef(true)
+  // Day 8B: ref mirror of deletedBefore so the Realtime callbacks (created in
+  // the load effect) always read the LATEST cutoff without re-subscribing.
+  const cutoffRef = useRef(null)
   const [reloadKey, setReloadKey] = useState(0)
   // Ids of messages THIS authenticated user created for this complaint —
   // restored from sessionStorage, updated on send. Self-knowledge only; it
@@ -142,10 +164,8 @@ export default function useComplaintChat(complaintId, ownerId) {
     setMessages((prev) => [...prev, msg])
   }, [])
 
-  // Stable upsert — INSERT events append; UPDATE events (Day 8A: edits,
-  // soft deletes) replace the message in place by its stable id. If an
-  // update somehow arrives before the insert, it is appended (the initial
-  // load would have included it anyway).
+  // Stable upsert — INSERT events append; UPDATE events (edits, soft deletes)
+  // replace the message in place by its stable id.
   const upsertMessage = useCallback((msg) => {
     if (!msg || !msg.id) return
     if (idsRef.current.has(msg.id)) {
@@ -167,11 +187,24 @@ export default function useComplaintChat(complaintId, ownerId) {
     setSendError('')
     setActionError('')
     setHiddenMessageIds(new Set())
+    setDeletedBefore(null)
+    cutoffRef.current = null
 
     async function loadInitial() {
       setLoading(true)
       try {
-        const rows = await fetchComplaintMessages(complaintId)
+        // Day 8B — fetch the caller's own conversation cutoff first. If the
+        // state lookup fails, fall back to loading all messages (no cutoff).
+        let cutoff = null
+        try {
+          cutoff = await fetchConversationState(complaintId)
+        } catch (err) {
+          console.error('[chat] failed to load conversation state', err)
+        }
+        if (cancelled) return
+        setDeletedBefore(cutoff)
+        cutoffRef.current = cutoff
+        const rows = await fetchComplaintMessages(complaintId, cutoff)
         if (cancelled) return
         idsRef.current = new Set(rows.map((m) => m.id))
         setMessages(rows)
@@ -204,7 +237,10 @@ export default function useComplaintChat(complaintId, ownerId) {
     }
 
     // Realtime — this complaint's messages only, safe columns only.
-    // INSERT (Day 7) + UPDATE (Day 8A: edits / soft deletes).
+    // INSERT (Day 7) + UPDATE (Day 8A). Day 8B: events for messages created
+    // at or before the user's conversation cutoff are ignored, so a replayed
+    // old event can never resurrect hidden messages — while post-cutoff
+    // messages (including brand-new ones) appear normally.
     const channel = supabase
       .channel(`complaint-messages:${complaintId}`)
       .on(
@@ -217,7 +253,8 @@ export default function useComplaintChat(complaintId, ownerId) {
           select: CHAT_SELECT_COLUMNS,
         },
         (payload) => {
-          if (!cancelled) addMessage(payload.new)
+          if (cancelled || !passesCutoff(payload.new, cutoffRef.current)) return
+          addMessage(payload.new)
         },
       )
       .on(
@@ -230,7 +267,8 @@ export default function useComplaintChat(complaintId, ownerId) {
           select: CHAT_SELECT_COLUMNS,
         },
         (payload) => {
-          if (!cancelled) upsertMessage(payload.new)
+          if (cancelled || !passesCutoff(payload.new, cutoffRef.current)) return
+          upsertMessage(payload.new)
         },
       )
       .subscribe((status, err) => {
@@ -274,7 +312,8 @@ export default function useComplaintChat(complaintId, ownerId) {
       // Mark it as "mine": in memory AND sessionStorage (keyed by this user +
       // complaint), so ownership survives a refresh/remount. The Realtime
       // event for this same row may also arrive — addMessage deduplicates by
-      // id, so it appears exactly once.
+      // id, so it appears exactly once. A message sent now is always after
+      // the conversation cutoff (if any), so it becomes visible immediately.
       persistOwnId(ownerId, complaintId, row.id)
       setOwnMessageIds((prev) => new Set(prev).add(row.id))
       addMessage(row)
@@ -363,6 +402,34 @@ export default function useComplaintChat(complaintId, ownerId) {
     }
   }
 
+  // Day 8B — delete the conversation for THIS user only. The RPC verifies
+  // authentication + complaint access, sets deleted_before = now() (a cutoff,
+  // not a permanent flag) and returns it. We clear the visible conversation
+  // and keep the Realtime subscription active: messages created after the
+  // cutoff will appear normally again.
+  async function deleteConversation() {
+    setActionError('')
+    if (actioningRef.current) return false
+    actioningRef.current = true
+    setDeletingConversation(true)
+    try {
+      const cutoff = await deleteConversationForMe(complaintId)
+      const cutoffStr = cutoff ?? new Date().toISOString()
+      cutoffRef.current = cutoffStr
+      setDeletedBefore(cutoffStr)
+      idsRef.current = new Set()
+      setMessages([])
+      return true
+    } catch (err) {
+      console.error('[chat] failed to delete conversation', err)
+      setActionError('Could not delete the conversation. Please try again.')
+      return false
+    } finally {
+      actioningRef.current = false
+      setDeletingConversation(false)
+    }
+  }
+
   return {
     messages,
     loading,
@@ -372,6 +439,8 @@ export default function useComplaintChat(complaintId, ownerId) {
     realtimeStatus,
     ownMessageIds,
     hiddenMessageIds,
+    deletedBefore,
+    deletingConversation,
     actioningId,
     actionError,
     retryLoad: () => setReloadKey((k) => k + 1),
@@ -379,5 +448,6 @@ export default function useComplaintChat(complaintId, ownerId) {
     editMessage,
     deleteForEveryone,
     deleteForMe,
+    deleteConversation,
   }
 }

@@ -280,21 +280,44 @@ export const CHAT_SELECT_COLUMNS = [
 ]
 
 /**
- * Day 7 — loads a complaint's conversation through the identity-free
+ * Day 7 + Day 8B — loads a complaint's conversation through the identity-free
  * messages_staff_view. Row visibility is enforced by RLS
  * (can_access_complaint): students see only their own complaints' messages,
  * faculty only non-sensitive, committee only sensitive, admin all. Only safe
  * fields are selected — never sender_id.
+ *
+ * Day 8B — optional `deletedBefore` cutoff: when the current user has
+ * deleted their conversation for me, only messages created AFTER the cutoff
+ * are fetched (created_at > deleted_before). The cutoff is an additional
+ * user-specific filter; it never removes rows from the database.
  */
-export async function fetchComplaintMessages(complaintId) {
+export async function fetchComplaintMessages(complaintId, deletedBefore = null) {
   const client = ensureSupabase()
-  const { data, error } = await client
+  let query = client
     .from('messages_staff_view')
     .select(CHAT_SELECT_COLUMNS.join(', '))
     .eq('complaint_id', complaintId)
-    .order('created_at', { ascending: true })
+  if (deletedBefore) query = query.gt('created_at', deletedBefore)
+  const { data, error } = await query.order('created_at', { ascending: true })
   if (error) throw error
   return data ?? []
+}
+
+/**
+ * Day 8B — loads the CURRENT user's conversation cutoff for one complaint
+ * (their own row only — RLS: user_id = auth.uid()). Returns the
+ * deleted_before timestamp (ISO string) or null when the user has never
+ * deleted this conversation. user_id is internal and never returned.
+ */
+export async function fetchConversationState(complaintId) {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .from('conversation_user_state')
+    .select('deleted_before')
+    .eq('complaint_id', complaintId)
+    .maybeSingle()
+  if (error) throw error
+  return data?.deleted_before ?? null
 }
 
 /**
@@ -367,6 +390,23 @@ export async function deleteComplaintMessageForMe(messageId) {
   })
   if (error) throw error
   return data?.[0] ?? null
+}
+
+/**
+ * Day 8B — deletes the conversation for the current user only. The RPC
+ * (SECURITY DEFINER) verifies authentication + complaint access, derives
+ * user_id from auth.uid() and upserts deleted_before = now() for this
+ * complaint. Returns the cutoff timestamp (ISO string) so the chat can hide
+ * pre-cutoff messages immediately. Messages created after the cutoff will
+ * become visible again; the complaint and messages are never touched.
+ */
+export async function deleteConversationForMe(complaintId) {
+  const client = ensureSupabase()
+  const { data, error } = await client.rpc('delete_complaint_conversation_for_me', {
+    p_complaint_id: complaintId,
+  })
+  if (error) throw error
+  return data?.[0]?.deleted_before ?? null
 }
 
 /**
