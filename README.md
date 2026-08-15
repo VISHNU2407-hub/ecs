@@ -15,7 +15,10 @@ the identity-free staff view); Day 6 adds the complaint status flow — a staff
 complaint detail page with a database-enforced status control and a
 role-anonymous status-history timeline; Day 7 adds the anonymous two-way
 conversation — a chat on every complaint (student and staff sides) powered by
-Supabase Realtime, with sender identity derived server-side and never exposed.
+Supabase Realtime, with sender identity derived server-side and never exposed;
+Day 8A adds WhatsApp-style message controls to that chat — edit, delete for
+me, and delete for everyone (soft delete) — enforced by SECURITY DEFINER
+RPCs so the database remains the only authority on message ownership.
 
 ## Getting started
 
@@ -34,7 +37,7 @@ npm run dev
 
 Open http://localhost:5173 — you'll be redirected to `/login`.
 
-## Database (Day 3 + Day 6)
+## Database (Day 3 + Day 6 + Day 7 + Day 8A)
 
 ### Applying the migrations
 
@@ -45,10 +48,11 @@ Run the migration files **in order** in the Supabase SQL editor (or via
 supabase/migrations/20260814000000_day3_database_security_foundation.sql  # Day 3 — schema, roles, security
 supabase/migrations/20260815000000_day6_status_flow.sql                  # Day 6 — status flow + history
 supabase/migrations/20260816000000_day7_anonymous_chat.sql               # Day 7 — chat validation + Realtime
+supabase/migrations/20260817000000_day8_message_controls.sql             # Day 8A — edit / delete for me / delete for everyone
 ```
 
 All are written to be re-runnable, but re-running is not required. The Day 3
-migration is never modified — Days 6 and 7 only add to it.
+migration is never modified — Days 6, 7 and 8A only add to it.
 
 There are local verification harnesses that boot a throwaway PostgreSQL
 instance and run the migrations plus the security checks:
@@ -311,12 +315,63 @@ Realtime preconditions (RLS row-level via `can_access_complaint`, `sender_id`
 not selectable, identity-free view). Realtime itself requires a live Supabase
 project (it cannot run inside embedded-postgres) — see the manual test below.
 
-### Not implemented yet (Day 8+)
+### Chat message controls (Day 8A)
 
-Notifications, push notifications, escalation automation, identity-reveal UI,
-analytics, duplicate detection, public complaint board, admin/faculty account
-management, file upload UI, and category assignment UI. The schema is ready
-for these.
+The anonymous chat now supports WhatsApp-style message controls, with the
+database as the only authority on ownership:
+
+- **Edit**: only the original sender can edit (`auth.uid() = messages.sender_id`
+  verified inside the `edit_complaint_message` RPC). Body is trimmed and
+  validated (1–2000 chars, empty/whitespace rejected), `edited_at` is set,
+  and `created_at` / `sender_role` / `sender_id` never change. The bubble
+  shows a small *(edited)* marker.
+- **Delete for everyone**: soft delete by the original sender only
+  (`is_deleted = true` + `deleted_at`; the row is never physically removed
+  so the state propagates through Realtime). Both sides then render
+  *"This message was deleted"* — the original body is no longer shown.
+  One-shot: repeated deletes are rejected.
+- **Delete for me**: any authorized participant can hide a message from
+  themselves via a per-user record in the new `message_user_deletions` table
+  (UNIQUE `(message_id, user_id)`, RLS scoped to `user_id = auth.uid()`,
+  SELECT-only grant). Other users are unaffected; delete-for-everyone always
+  takes precedence.
+- **RPC-only writes**: there is no UPDATE/DELETE grant on `messages` and no
+  INSERT/DELETE grant on `message_user_deletions` for any client role. The
+  three SECURITY DEFINER RPCs (`edit_complaint_message`,
+  `delete_complaint_message_for_everyone`, `delete_complaint_message_for_me`)
+  are the only write paths, and each re-checks complaint access via the
+  existing `can_access_complaint()` model. The client never sends
+  `sender_id` / `sender_role` / `user_id`.
+- **Realtime**: the subscription now also receives UPDATE events (edited
+  body, `edited_at`, `is_deleted`, `deleted_at`) with the same
+  `complaint_id` filter and safe column selection — edits and deletes appear
+  in both browsers without a refresh. Delete-for-me is user-specific and is
+  not broadcast.
+- **UI**: a ⋮ action menu on every message (own: Copy / Edit / Delete for me
+  / Delete for everyone; other: Copy / Delete for me), an inline edit editor,
+  a mobile-friendly confirmation dialog for deletes, and clipboard copy with
+  a graceful fallback. The WhatsApp-style bubbles, "You" ownership styling
+  and anonymity guarantees are unchanged.
+
+Local verification:
+
+```bash
+node scripts/verify-day8.mjs
+```
+
+This boots a throwaway PostgreSQL instance, applies the Day 3 + 6 + 7 + 8A
+migrations, and runs 57 checks: per-role edit/delete ownership, edit
+validation, soft-delete semantics, per-user deletion records, anon RPC
+rejection, direct UPDATE/DELETE/INSERT bypass rejection, identity-column
+hiding, complaint-access and sensitive restrictions, unchanged Day 7 sending
+and Day 6 status behavior, and Realtime preconditions.
+
+### Not implemented yet (Day 8B+)
+
+Delete conversation for me (Day 8B), notifications, push notifications,
+escalation automation, identity-reveal UI, analytics, duplicate detection,
+public complaint board, admin/faculty account management, file upload UI,
+and category assignment UI. The schema is ready for these.
 
 ## Authentication (Day 2)
 

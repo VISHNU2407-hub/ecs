@@ -267,7 +267,17 @@ export const MESSAGE_MAX_LENGTH = 2000
 // The ONLY columns the chat ever touches. sender_id / student_id are not in
 // this list AND are not selectable by `authenticated` (Day 3 column grants),
 // so neither REST responses nor Realtime payloads can ever contain them.
-export const CHAT_SELECT_COLUMNS = ['id', 'complaint_id', 'sender_role', 'body', 'created_at']
+// Day 8A adds the edit / soft-delete state columns (still identity-free).
+export const CHAT_SELECT_COLUMNS = [
+  'id',
+  'complaint_id',
+  'sender_role',
+  'body',
+  'created_at',
+  'edited_at',
+  'is_deleted',
+  'deleted_at',
+]
 
 /**
  * Day 7 — loads a complaint's conversation through the identity-free
@@ -280,7 +290,7 @@ export async function fetchComplaintMessages(complaintId) {
   const client = ensureSupabase()
   const { data, error } = await client
     .from('messages_staff_view')
-    .select('id, complaint_id, sender_role, body, created_at')
+    .select(CHAT_SELECT_COLUMNS.join(', '))
     .eq('complaint_id', complaintId)
     .order('created_at', { ascending: true })
   if (error) throw error
@@ -301,8 +311,76 @@ export async function sendComplaintMessage(complaintId, body) {
   const { data, error } = await client
     .from('messages')
     .insert({ complaint_id: complaintId, body })
-    .select('id, complaint_id, sender_role, body, created_at')
+    .select(CHAT_SELECT_COLUMNS.join(', '))
     .single()
   if (error) throw error
   return data
+}
+
+// ---------------------------------------------------------------------------
+// Day 8A — Chat message controls (edit / delete for me / delete for everyone)
+//
+// All three operations go through SECURITY DEFINER RPCs — the ONLY write
+// paths. The client submits only the message id (and, for edit, the new
+// body). Ownership (auth.uid() = messages.sender_id), complaint access and
+// state validation are enforced inside the database; the client never sends
+// sender_id / sender_role / user_id.
+// ---------------------------------------------------------------------------
+
+/**
+ * Day 8A — edits the caller's own message. Returns the updated safe row
+ * (id, complaint_id, sender_role, body, created_at, edited_at, is_deleted,
+ * deleted_at).
+ */
+export async function editComplaintMessage(messageId, newBody) {
+  const client = ensureSupabase()
+  const { data, error } = await client.rpc('edit_complaint_message', {
+    p_message_id: messageId,
+    p_new_body: newBody,
+  })
+  if (error) throw error
+  return data?.[0] ?? null
+}
+
+/**
+ * Day 8A — soft-deletes the caller's own message for everyone (is_deleted +
+ * deleted_at; the row is never physically removed). Returns the updated safe
+ * row.
+ */
+export async function deleteComplaintMessageForEveryone(messageId) {
+  const client = ensureSupabase()
+  const { data, error } = await client.rpc('delete_complaint_message_for_everyone', {
+    p_message_id: messageId,
+  })
+  if (error) throw error
+  return data?.[0] ?? null
+}
+
+/**
+ * Day 8A — hides a message from the current user only (creates the caller's
+ * own record in message_user_deletions). Returns { message_id, deleted_at }.
+ */
+export async function deleteComplaintMessageForMe(messageId) {
+  const client = ensureSupabase()
+  const { data, error } = await client.rpc('delete_complaint_message_for_me', {
+    p_message_id: messageId,
+  })
+  if (error) throw error
+  return data?.[0] ?? null
+}
+
+/**
+ * Day 8A — loads the CURRENT user's "delete for me" message ids for one
+ * complaint, so hidden messages stay hidden across refresh/remount. Only the
+ * caller's own records are returned (RLS: user_id = auth.uid()), joined to
+ * messages only to scope by complaint_id. Returns an array of message ids.
+ */
+export async function fetchMyMessageDeletions(complaintId) {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .from('message_user_deletions')
+    .select('message_id, messages!inner(complaint_id)')
+    .eq('messages.complaint_id', complaintId)
+  if (error) throw error
+  return (data ?? []).map((row) => row.message_id)
 }

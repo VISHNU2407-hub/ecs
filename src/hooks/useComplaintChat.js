@@ -3,7 +3,11 @@ import { supabase } from '../lib/supabaseClient.js'
 import {
   CHAT_SELECT_COLUMNS,
   MESSAGE_MAX_LENGTH,
+  deleteComplaintMessageForEveryone,
+  deleteComplaintMessageForMe,
+  editComplaintMessage,
   fetchComplaintMessages,
+  fetchMyMessageDeletions,
   sendComplaintMessage,
 } from '../lib/complaintService.js'
 
@@ -58,9 +62,10 @@ function persistOwnId(ownerId, complaintId, id) {
 }
 
 /**
- * Day 7 — chat state for ONE complaint, shared by the student and staff
- * conversation UIs.
+ * Day 7 + Day 8A — chat state for ONE complaint, shared by the student and
+ * staff conversation UIs.
  *
+ * Day 7 (unchanged behavior):
  * - Initial load through messages_staff_view (RLS decides visibility).
  * - Supabase Realtime subscription for INSERT events on `messages`, filtered
  *   to this complaint only (`complaint_id=eq.…`) and selecting ONLY safe
@@ -77,6 +82,21 @@ function persistOwnId(ownerId, complaintId, id) {
  *   updated on every send. This is local UI state — never an identity field —
  *   and lets the chat render "You (Role)" for the current user's own staff
  *   messages even after a refresh.
+ *
+ * Day 8A (additions):
+ * - The Realtime subscription also receives UPDATE events (edited body,
+ *   edited_at, is_deleted, deleted_at) with the same complaint filter and
+ *   safe column selection; updates replace the message in place (stable id,
+ *   same dedupe guarantees).
+ * - hiddenMessageIds: ids the CURRENT user has "deleted for me". Restored on
+ *   load via the caller's own message_user_deletions records (RLS scopes them
+ *   to the caller), updated when delete-for-me succeeds. Local UI state only.
+ * - editMessage / deleteForEveryone / deleteForMe call the Day 8 SECURITY
+ *   DEFINER RPCs — the only write paths. Ownership + access are enforced
+ *   server-side (auth.uid() = messages.sender_id); this hook never sends
+ *   sender_id / sender_role / user_id.
+ * - actioningId / actionError track a single in-flight action so the UI can
+ *   disable controls and prevent duplicate requests.
  */
 export default function useComplaintChat(complaintId, ownerId) {
   const [messages, setMessages] = useState([])
@@ -86,10 +106,17 @@ export default function useComplaintChat(complaintId, ownerId) {
   const [sendError, setSendError] = useState('')
   // 'connecting' | 'subscribed' | 'error' | 'disabled'
   const [realtimeStatus, setRealtimeStatus] = useState(supabase ? 'connecting' : 'disabled')
+  // Day 8A: ids this user has hidden with "delete for me" (restored on load).
+  const [hiddenMessageIds, setHiddenMessageIds] = useState(() => new Set())
+  // Day 8A: the message id currently being edited/deleted (in-flight guard).
+  const [actioningId, setActioningId] = useState(null)
+  // Day 8A: last action failure message ('' = no error).
+  const [actionError, setActionError] = useState('')
 
   const idsRef = useRef(new Set())
   const channelRef = useRef(null)
   const sendingRef = useRef(false)
+  const actioningRef = useRef(false)
   const mountedRef = useRef(true)
   const [reloadKey, setReloadKey] = useState(0)
   // Ids of messages THIS authenticated user created for this complaint —
@@ -115,6 +142,20 @@ export default function useComplaintChat(complaintId, ownerId) {
     setMessages((prev) => [...prev, msg])
   }, [])
 
+  // Stable upsert — INSERT events append; UPDATE events (Day 8A: edits,
+  // soft deletes) replace the message in place by its stable id. If an
+  // update somehow arrives before the insert, it is appended (the initial
+  // load would have included it anyway).
+  const upsertMessage = useCallback((msg) => {
+    if (!msg || !msg.id) return
+    if (idsRef.current.has(msg.id)) {
+      setMessages((prev) => prev.map((m) => (m.id === msg.id ? msg : m)))
+    } else {
+      idsRef.current.add(msg.id)
+      setMessages((prev) => [...prev, msg])
+    }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     idsRef.current = new Set()
@@ -124,6 +165,8 @@ export default function useComplaintChat(complaintId, ownerId) {
     setMessages([])
     setLoadError('')
     setSendError('')
+    setActionError('')
+    setHiddenMessageIds(new Set())
 
     async function loadInitial() {
       setLoading(true)
@@ -141,6 +184,18 @@ export default function useComplaintChat(complaintId, ownerId) {
     }
     loadInitial()
 
+    // Day 8A — restore this user's "delete for me" set (non-fatal: if it
+    // fails, hidden messages simply reappear this session).
+    async function loadDeletions() {
+      try {
+        const ids = await fetchMyMessageDeletions(complaintId)
+        if (!cancelled) setHiddenMessageIds(new Set(ids))
+      } catch (err) {
+        console.error('[chat] failed to load hidden-message state', err)
+      }
+    }
+    loadDeletions()
+
     if (!supabase) {
       setRealtimeStatus('disabled')
       return () => {
@@ -149,6 +204,7 @@ export default function useComplaintChat(complaintId, ownerId) {
     }
 
     // Realtime — this complaint's messages only, safe columns only.
+    // INSERT (Day 7) + UPDATE (Day 8A: edits / soft deletes).
     const channel = supabase
       .channel(`complaint-messages:${complaintId}`)
       .on(
@@ -162,6 +218,19 @@ export default function useComplaintChat(complaintId, ownerId) {
         },
         (payload) => {
           if (!cancelled) addMessage(payload.new)
+        },
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'messages',
+          filter: `complaint_id=eq.${complaintId}`,
+          select: CHAT_SELECT_COLUMNS,
+        },
+        (payload) => {
+          if (!cancelled) upsertMessage(payload.new)
         },
       )
       .subscribe((status, err) => {
@@ -220,6 +289,80 @@ export default function useComplaintChat(complaintId, ownerId) {
     }
   }
 
+  // Day 8A — edit the caller's own message via the RPC (ownership enforced
+  // server-side). On success the returned row replaces the local copy; the
+  // Realtime UPDATE event for the same id is a no-op duplicate.
+  async function editMessage(messageId, newBody) {
+    setActionError('')
+    const body = newBody.trim()
+    if (!body) {
+      setActionError('Message cannot be empty.')
+      return false
+    }
+    if (body.length > MESSAGE_MAX_LENGTH) {
+      setActionError(`Message must be at most ${MESSAGE_MAX_LENGTH} characters.`)
+      return false
+    }
+    if (actioningRef.current) return false
+    actioningRef.current = true
+    setActioningId(messageId)
+    try {
+      const row = await editComplaintMessage(messageId, body)
+      if (!row) throw new Error('empty response')
+      upsertMessage(row)
+      return true
+    } catch (err) {
+      console.error('[chat] failed to edit message', err)
+      setActionError('Could not edit the message. Please try again.')
+      return false
+    } finally {
+      actioningRef.current = false
+      setActioningId(null)
+    }
+  }
+
+  // Day 8A — soft-delete the caller's own message for everyone via the RPC.
+  async function deleteForEveryone(messageId) {
+    setActionError('')
+    if (actioningRef.current) return false
+    actioningRef.current = true
+    setActioningId(messageId)
+    try {
+      const row = await deleteComplaintMessageForEveryone(messageId)
+      if (!row) throw new Error('empty response')
+      upsertMessage(row)
+      return true
+    } catch (err) {
+      console.error('[chat] failed to delete message for everyone', err)
+      setActionError('Could not delete the message. Please try again.')
+      return false
+    } finally {
+      actioningRef.current = false
+      setActioningId(null)
+    }
+  }
+
+  // Day 8A — hide a message from THIS user only via the RPC (creates the
+  // caller's own message_user_deletions record; other users are unaffected).
+  async function deleteForMe(messageId) {
+    setActionError('')
+    if (actioningRef.current) return false
+    actioningRef.current = true
+    setActioningId(messageId)
+    try {
+      await deleteComplaintMessageForMe(messageId)
+      setHiddenMessageIds((prev) => new Set(prev).add(messageId))
+      return true
+    } catch (err) {
+      console.error('[chat] failed to delete message for me', err)
+      setActionError('Could not hide the message. Please try again.')
+      return false
+    } finally {
+      actioningRef.current = false
+      setActioningId(null)
+    }
+  }
+
   return {
     messages,
     loading,
@@ -228,7 +371,13 @@ export default function useComplaintChat(complaintId, ownerId) {
     sendError,
     realtimeStatus,
     ownMessageIds,
+    hiddenMessageIds,
+    actioningId,
+    actionError,
     retryLoad: () => setReloadKey((k) => k + 1),
     sendMessage,
+    editMessage,
+    deleteForEveryone,
+    deleteForMe,
   }
 }
