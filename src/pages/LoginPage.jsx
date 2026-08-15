@@ -1,11 +1,9 @@
 import { useState } from 'react'
-import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext.jsx'
-import { getUserRole } from '../lib/authService.js'
 
 export default function LoginPage() {
   const { signIn } = useAuth()
-  const navigate = useNavigate()
   const location = useLocation()
 
   const [email, setEmail] = useState('')
@@ -22,11 +20,16 @@ export default function LoginPage() {
 
     setSubmitting(true)
     try {
-      const { user } = await signIn(email.trim(), password)
-      navigate(`/${getUserRole(user)}`, { replace: true })
+      await signIn(email.trim(), password)
+      // No navigation here. The auth state change triggers the role lookup in
+      // AuthProvider; PublicOnlyRoute waits for it to resolve and then
+      // redirects to the correct dashboard. Navigating from this page would
+      // race the async profile-role fetch (and could never know the target
+      // route) — it was the source of the /null redirect bug.
     } catch {
       // Do not leak whether an account with this email exists (locked decision #11).
       setError('Invalid email or password.')
+    } finally {
       setSubmitting(false)
     }
   }

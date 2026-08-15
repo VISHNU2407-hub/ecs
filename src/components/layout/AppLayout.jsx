@@ -92,7 +92,7 @@ export default function AppLayout({ role, children }) {
 
       <footer className="border-t border-gray-200 bg-white py-4">
         <p className="text-center text-xs text-gray-500">
-          College Complaint Management System — Day 4 (Complaint Submission)
+          College Complaint Management System — Day 5 (Student & Staff Dashboards)
         </p>
       </footer>
     </div>

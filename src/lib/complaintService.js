@@ -74,3 +74,72 @@ export async function submitComplaint({ studentId, categoryId, description, prio
   if (error) throw error
   return data
 }
+
+/**
+ * Day 5 — fetches the signed-in student's own complaints for the dashboard.
+ *
+ * Ownership is enforced ENTIRELY by the Day 3 RLS policy
+ * (complaints_select_student: student_id = auth.uid()) — the query itself
+ * carries no ownership filter, and it cannot: student_id is excluded from
+ * the SELECT column grant, so neither this query nor any other can reference
+ * it (that is exactly what keeps staff from ever reading it). There is
+ * therefore no client-supplied id at all — the database resolves the
+ * authenticated user itself via auth.uid().
+ *
+ * The category name is resolved through the existing complaints ->
+ * complaint_categories relationship (PostgREST embedded resource), so the
+ * dashboard shows the category NAME, never only the category UUID. Only the
+ * fields the dashboard displays are selected — description and identity
+ * fields stay out of the response.
+ *
+ * Returns rows normalized to a stable shape:
+ *   { id, ticket_number, category_id, category, priority, status,
+ *     created_at, updated_at }
+ */
+export async function fetchStudentComplaints() {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .from('complaints')
+    .select(
+      'id, ticket_number, category_id, priority, status, created_at, updated_at, complaint_categories(name)',
+    )
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    ticket_number: row.ticket_number,
+    category_id: row.category_id,
+    category: row.complaint_categories?.name ?? null,
+    priority: row.priority,
+    status: row.status,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }))
+}
+
+/**
+ * Day 5 — fetches the anonymous complaint list for the staff dashboard.
+ *
+ * Uses the Day 3 safe view public.complaints_staff_view, which is a
+ * security-invoker view that projects ONLY identity-free fields and respects
+ * the underlying RLS: faculty see non-sensitive complaints, committee see
+ * sensitive ones, admin sees all ECS complaints. The frontend does NOT
+ * reconstruct identity — it cannot, because student_id / sender_id are not
+ * selectable at all (column grants) and are not part of this response.
+ *
+ * Only the fields the dashboard displays are selected. Returns the view rows
+ * unchanged (already identity-free):
+ *   { ticket_number, category, department, priority, status, handler_type,
+ *     is_sensitive, created_at, updated_at }
+ */
+export async function fetchStaffComplaints() {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .from('complaints_staff_view')
+    .select(
+      'ticket_number, category, department, priority, status, handler_type, is_sensitive, created_at, updated_at',
+    )
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  return data ?? []
+}

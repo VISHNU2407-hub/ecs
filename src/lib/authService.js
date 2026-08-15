@@ -49,9 +49,11 @@ export async function getUserRole(user) {
  * the router. The DB roles are student / faculty / admin / committee; the
  * existing routes are /student, /staff and /admin.
  *
- *   faculty  -> staff  (the staff dashboard is the faculty dashboard)
- *   committee -> staff (interim: committee gets the staff placeholder until
- *                       its own dashboard exists in Day 4+)
+ * Day 5 mapping (unchanged role system, no new dashboards):
+ *   student  -> student (own complaints dashboard)
+ *   faculty  -> staff   (the staff dashboard is the faculty dashboard)
+ *   admin    -> staff   (interim: no separate admin dashboard yet)
+ *   committee -> staff  (interim: no separate committee dashboard yet)
  *
  * Unknown roles fall back to the student dashboard (least privilege).
  */
@@ -60,9 +62,7 @@ export function getDashboardKey(role) {
     case 'student':
       return 'student'
     case 'faculty':
-      return 'staff'
     case 'admin':
-      return 'admin'
     case 'committee':
       return 'staff'
     default:

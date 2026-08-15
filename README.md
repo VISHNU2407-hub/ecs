@@ -8,7 +8,10 @@ foundation for the **ECS** department pilot (anonymous complaints, RLS,
 identity-safe staff views); Day 4 adds the student complaint submission
 flow — a category-aware form (categories fetched from the database), a
 validated description and priority, and database-generated CMP-XXXX ticket
-numbers.
+numbers; Day 5 adds the first real dashboards — the student dashboard
+(summary stats + the student's own complaints) and the staff dashboard
+(anonymous complaint list with status/category/priority/ticket filters over
+the identity-free staff view).
 
 ## Getting started
 
@@ -150,13 +153,56 @@ department/sensitivity, committee handling for sensitive categories, priority
 default, RLS isolation, and rejection of forged or missing values (34
 checks).
 
-### Not implemented yet (Day 5+)
+### Dashboards (Day 5)
 
-Complaint dashboard/tracking and detail views (Day 5), anonymous chat UI,
-Supabase Realtime, notifications, escalation jobs, analytics, duplicate
-detection, public complaint board, identity-reveal UI, admin/faculty account
-management, file upload UI, and category assignment UI. The schema is ready
-for these.
+The placeholder student and staff pages became real dashboards over the
+Day 3 database:
+
+**Student dashboard** (`/student`)
+
+- Summary cards: total, active, and resolved/closed complaints.
+- "My Complaints": the signed-in student's own complaints only — fetched
+  with `student_id = <their id>` and enforced again by RLS
+  (`complaints_select_student`), so the frontend can never see another
+  student's rows.
+- Each row shows ticket number, category **name** (resolved through the
+  existing `complaints -> complaint_categories` relationship — never
+  hardcoded), priority, status, created and updated dates.
+- Empty state with a "Submit your first complaint" button, plus loading and
+  error/retry states.
+
+**Staff dashboard** (`/staff`)
+
+- Loads ECS complaints exclusively through the safe view
+  `public.complaints_staff_view` (security-invoker, identity-free). RLS
+  decides row visibility per role: faculty see non-sensitive, committee see
+  sensitive, admin see all.
+- Rows show ticket number, category, department, priority, status, handler
+  type, a sensitive/standard indicator, and created/updated dates.
+- No identity fields anywhere: the response has no `student_id`, `sender_id`,
+  email or name columns, and the frontend never joins complaints to
+  profiles/users.
+- Filters on safe fields only: status, category, priority, and an optional
+  ticket-number search (case-insensitive).
+
+Local verification (no Supabase account needed):
+
+```bash
+node scripts/verify-day5.mjs
+```
+
+This boots a throwaway PostgreSQL instance, applies the Day 3 migration
+unchanged, and runs the exact dashboard queries — student isolation and
+category-name resolution, the staff view response (no identity columns),
+role-based row visibility on the view (faculty/committee/admin), anon
+rejection, and the staff filter logic.
+
+### Not implemented yet (Day 6+)
+
+Complaint detail views, anonymous chat UI, Supabase Realtime, notifications,
+escalation jobs, analytics, duplicate detection, public complaint board,
+identity-reveal UI, admin/faculty account management, file upload UI, and
+category assignment UI. The schema is ready for these.
 
 ## Authentication (Day 2)
 
@@ -183,8 +229,9 @@ runs and roles are set in the database.
 The database roles are `student`, `faculty`, `admin` and `committee`, while
 the existing dashboard routes are `/student`, `/staff` and `/admin`.
 `getDashboardKey` maps `faculty → staff` (the staff dashboard is the faculty
-dashboard) and `committee → staff` for now (interim; the committee dashboard
-arrives in Day 4+). Unknown roles fall back to `student`.
+dashboard) and, since Day 5, `admin → staff` and `committee → staff` for now
+(no separate admin/committee dashboards yet — those arrive in later phases).
+Unknown roles fall back to `student`.
 
 ## Routes
 
@@ -194,10 +241,10 @@ arrives in Day 4+). Unknown roles fall back to `student`.
 | `/register`       | Create a student account                | Public (redirects if signed in) |
 | `/forgot-password`| Request a password reset email          | Public                |
 | `/update-password`| Set a new password (recovery link lands here) | Recovery session |
-| `/student`        | Student dashboard placeholder           | Signed-in students    |
+| `/student`        | Student dashboard (own complaints + stats) | Signed-in students |
 | `/student/complaints/new` | Submit a complaint form        | Signed-in students    |
-| `/staff`          | Staff dashboard placeholder             | Faculty               |
-| `/admin`          | Admin dashboard placeholder             | Admin                 |
+| `/staff`          | Staff dashboard (anonymous complaints + filters) | Faculty (admin/committee for now) |
+| `/admin`          | Admin dashboard placeholder (admins currently route to `/staff`) | Admin |
 
 Unknown routes redirect to `/login`.
 
@@ -212,7 +259,8 @@ Unknown routes redirect to `/login`.
 │       └── 20260814000000_day3_database_security_foundation.sql
 ├── scripts/
 │   ├── verify-day3.mjs       # Local Postgres verification harness (Day 3)
-│   └── verify-day4.mjs       # Local Postgres verification harness (Day 4)
+│   ├── verify-day4.mjs       # Local Postgres verification harness (Day 4)
+│   └── verify-day5.mjs       # Local Postgres verification harness (Day 5)
 └── src/
     ├── main.jsx              # React root + BrowserRouter
     ├── App.jsx               # Route definitions + AuthProvider
@@ -220,12 +268,15 @@ Unknown routes redirect to `/login`.
     ├── lib/
     │   ├── supabaseClient.js  # Supabase client (env-driven, anon key only)
     │   ├── authService.js     # Auth actions + role resolution from profiles
-    │   └── complaintService.js# Day 4: category fetch + complaint submission
+    │   ├── complaintService.js# Day 4+5: category fetch, submission, dashboard queries
+    │   └── format.js          # Day 5: shared date formatting
     ├── context/
     │   └── AuthContext.jsx    # AuthProvider / useAuth (session, role, actions)
     ├── components/
     │   ├── layout/
     │   │   └── AppLayout.jsx  # Shared role-aware layout (header/nav/footer)
+    │   ├── complaints/
+    │   │   └── Badges.jsx     # Day 5: status/priority/sensitive badges
     │   ├── ProtectedRoute.jsx # Role-aware route guards (Protected + PublicOnly)
     │   ├── LoadingScreen.jsx  # Session-check loading state
     │   └── PagePlaceholder.jsx
@@ -234,8 +285,8 @@ Unknown routes redirect to `/login`.
         ├── RegisterPage.jsx
         ├── ForgotPasswordPage.jsx
         ├── UpdatePasswordPage.jsx
-        ├── StudentPage.jsx
+        ├── StudentPage.jsx    # Day 5: student dashboard
         ├── SubmitComplaintPage.jsx  # Day 4: complaint form + success screen
-        ├── StaffPage.jsx
+        ├── StaffPage.jsx      # Day 5: staff dashboard (anonymous + filters)
         └── AdminPage.jsx
 ```
