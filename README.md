@@ -33,7 +33,30 @@ an admin-only mechanism that narrows each faculty member's visibility to
 their own department and the complaint categories assigned to them, enforced
 entirely by RLS and the existing SECURITY DEFINER helpers (a Labs-assigned
 faculty member sees ECS Labs complaints and nothing else, on every read
-path: dashboard, detail, chat, history and status updates).
+path: dashboard, detail, chat, history and status updates); Day 10A adds
+complaint-level **Edit** and **Delete** for the owning student — an inline
+edit form (title, description, category, priority) and a soft-delete — both
+exclusively through new SECURITY DEFINER RPCs that verify ownership,
+submitted status and category routing inside the database, with deleted
+complaints silently vanishing from every read path (dashboards, detail
+pages, direct URLs, chat, history) without ever leaking that they existed;
+Day 10B adds optional **evidence attachments** — up to 5 images and one
+video per complaint — stored in a PRIVATE Supabase Storage bucket under
+randomized, identity-free paths, with only metadata in PostgreSQL, accessed
+exclusively through short-lived signed URLs gated by the same
+`can_access_complaint()` / `faculty_can_access_complaint()` rules, and
+created/removed only through new SECURITY DEFINER RPCs that re-verify
+ownership, submitted status, type/size/count limits and the real uploaded
+bytes server-side; Day 10C adds **faculty self-registration** — a separate
+`/faculty/register` flow gated by a PRIVATE faculty registration code (stored
+only as a bcrypt hash in the database, never in the frontend, env files,
+email or the UI), where the faculty member picks their department and the
+non-sensitive complaint categories routed to it, and a SECURITY DEFINER RPC
+validates the code, the department and every category inside the database
+(no email verification — Day 10E — the private code is the authorization
+gate) before atomically setting `profiles.role = 'faculty'`,
+`profiles.department_id` and the `faculty_category_assignments` rows — the
+only role-elevation path in the system.
 
 ## Getting started
 
@@ -52,7 +75,7 @@ npm run dev
 
 Open http://localhost:5173 — you'll be redirected to `/login`.
 
-## Database (Day 3 + Day 6 + Day 7 + Day 8A + Day 8B)
+## Database (Day 3 .. Day 10E)
 
 ### Applying the migrations
 
@@ -67,10 +90,16 @@ supabase/migrations/20260817000000_day8_message_controls.sql             # Day 8
 supabase/migrations/20260818000000_day8b_delete_conversation_for_me.sql  # Day 8B — delete conversation for me
 supabase/migrations/20260819000000_day9_resolution_escalation.sql        # Day 9 — resolution confirmation, reopen, escalation
 supabase/migrations/20260820000000_day9b_faculty_category_assignment.sql # Day 9B — faculty category assignment & routing
+supabase/migrations/20260821000000_day10a_complaint_edit_delete.sql     # Day 10A — complaint edit & delete
+supabase/migrations/20260822000000_day10b_complaint_attachments.sql    # Day 10B — complaint attachments
+supabase/migrations/20260823000000_day10c_faculty_self_registration.sql # Day 10C — faculty self-registration
+supabase/migrations/20260824000000_day10d_faculty_registration_options.sql # Day 10D — registration options RPC (anonymous reference-data read)
+supabase/migrations/20260825000000_day10e_faculty_registration_no_email_verification.sql # Day 10E — register_faculty without the email-confirmation requirement
 ```
 
 All are written to be re-runnable, but re-running is not required. The Day 3
-migration is never modified — Days 6, 7, 8A, 8B, 9 and 9B only add to it.
+migration is never modified — Days 6, 7, 8A, 8B, 9, 9B, 10A, 10B, 10C, 10D
+and 10E only add to it.
 
 There are local verification harnesses that boot a throwaway PostgreSQL
 instance and run the migrations plus the security checks:
@@ -89,10 +118,12 @@ node scripts/verify-day6.mjs
 | `departments`               | Only `ECS` is seeded for this MVP                                        |
 | `complaint_categories`      | The 8 ECS categories; `Harassment / Ragging` is `is_sensitive = true`    |
 | `category_department_map`   | Category → department routing (all 8 categories map to ECS)              |
-| `complaints`                | Anonymous complaints; `ticket_number` unique (`CMP-XXXX`)                |
+| `complaints`                | Anonymous complaints; `ticket_number` unique (`CMP-XXXX`); `title`, `deleted_at`, `deleted_by_role` (Day 10A) |
 | `messages`                  | Complaint messages; `sender_id` stored for audit, never exposed          |
 | `identity_reveal_requests`  | Student-controlled consent to reveal identity (no UI yet)                |
-| `faculty_category_assignments` | Admin-assigned complaint categories per faculty member (Day 9B)      |
+| `faculty_category_assignments` | Faculty complaint categories (admin-assigned OR chosen at Day 10C self-registration) |
+| `complaint_attachments`     | Attachment METADATA only (random storage path, name, type, size) (Day 10B) |
+| `faculty_registration_codes` | bcrypt HASH of the private faculty registration code only (Day 10C); zero RLS policies, zero grants |
 | `system_settings`           | Database configuration (Day 9 escalation threshold)                     |
 
 ### Roles & enums
@@ -572,19 +603,373 @@ per category/department, role isolation, identity hiding (sender_id /
 student_id / email / name), base-table RLS (no frontend filtering), direct
 bypass rejection, anon blocking, and Day 3–9 regressions.
 
-### Not implemented yet (Day 10+)
+### Complaint Edit & Delete (Day 10A)
+
+The owning student can now **edit** or **delete** their own complaint, but
+only while it is **Submitted** — and only through the database. There is
+still **no UPDATE or DELETE grant** on `public.complaints` for any client
+role; two new SECURITY DEFINER RPCs are the only write paths.
+
+**Edit rules** — `public.edit_complaint(complaint_id, new_title,
+new_description, new_category_id, new_priority)`:
+
+- Verified **inside** the function (RLS does not apply to the owner):
+  authenticated caller, role = `student` (from `public.profiles.role` via
+  `get_app_role()` — never from the client), ownership
+  (`complaint.student_id = auth.uid()` — the user id is never accepted from
+  the client), complaint exists, not soft-deleted, current status
+  `submitted`.
+- The UPDATE writes **only** `title`, `description`, `category_id` and
+  `priority`. `id`, `ticket_number`, `student_id`, `department_id`, `status`,
+  `created_at`, `updated_at` (maintained by the Day 3 trigger), sensitivity
+  and handler type are never writable by the client.
+- Validation: title 1–200 chars, description 20–10000 chars, priority must be
+  a valid `priority_level` enum value, category must exist.
+- **Category routing**: the new category must be mapped to the complaint's
+  OWN department via `category_department_map` (the student can never pick a
+  department). A new Day 10A trigger re-derives `is_sensitive`,
+  `handler_type` and `department_id` from the new category using the same
+  `derive_complaint_defaults()` logic as submission, so faculty visibility
+  after an edit is decided exactly as before by
+  `faculty_can_access_complaint()` / `can_access_complaint()` reading the
+  new `category_id` live — there is no frontend routing.
+- **Sensitivity is immutable**: a non-sensitive complaint cannot be moved to
+  a sensitive category and a sensitive (committee-handled) complaint cannot
+  be moved to a non-sensitive one. A student can never make a complaint
+  sensitive.
+- Returns only safe fields — never `student_id`, `deleted_at` or
+  `deleted_by_role`.
+
+**Delete rules** — `public.delete_complaint(complaint_id)`:
+
+- **Soft delete**: sets `deleted_at = now()` + `deleted_by_role = 'student'`
+  atomically; the complaint row is never physically removed. `deleted_at` /
+  `deleted_by_role` are **not granted** to any client role and are not
+  projected by `complaints_staff_view`, so nobody can even learn a complaint
+  was deleted.
+- Same authorization model: authenticated, role = `student`, ownership via
+  `auth.uid()`, exists, not already deleted, status `submitted`. Resolved /
+  closed / under-review / escalated complaints can never be deleted, another
+  student's complaint can never be deleted, and faculty / committee / admin /
+  anonymous callers are rejected.
+
+**Soft-delete behavior / visibility**: every read path now excludes deleted
+complaints — the four `complaints` SELECT policies, `can_access_complaint()`
+and `faculty_can_access_complaint()` all require `deleted_at is null`, so a
+deleted complaint disappears from the student dashboard, staff dashboard,
+both detail pages, direct-URL lookups, chat reads, status history and message
+access, returning the same empty "not found / no access" result as any other
+inaccessible complaint. The status RPCs (`update_complaint_status`,
+`confirm_complaint_resolution`, `reopen_complaint`) and the automatic
+escalation function refuse deleted complaints. Messages and
+`complaint_status_history` are **never physically deleted** (audit stays
+intact) — they are simply unreachable through the app, and identity
+protection is unchanged (`sender_id` / `student_id` / email / name remain
+unselectable).
+
+**Realtime**: the existing per-complaint UPDATE subscriptions are unchanged.
+Deleting a complaint intentionally produces **no** Realtime event for any
+authenticated client — RLS drops events for rows the subscriber can no
+longer select, which is the security model working as intended (nobody is
+ever told a complaint existed and was deleted). The deleting student's page
+navigates straight back to the dashboard (which shows a success banner), and
+the student and staff dashboards refetch quietly when the tab regains focus,
+so a deleted complaint disappears from already-open views without a manual
+refresh.
+
+**UI**: on the student detail page, while the complaint is Submitted, an
+**Edit Complaint** button opens an inline form prefilled with the current
+title / description / category / priority (validation and character limits
+match the submission rules; loading, success, error states; duplicate-click
+protection) and a **Delete Complaint** button opens a confirmation dialog
+that states the complaint will be removed from the portal and cannot be
+undone from the UI. After a successful delete the page navigates to the
+Student Dashboard with a success message and the complaint is gone. The
+controls disappear as soon as the status leaves `submitted`. Staff get **no**
+edit/delete control — they simply stop seeing the complaint.
+
+Local verification:
+
+```bash
+node scripts/verify-day10a.mjs
+```
+
+This boots a throwaway PostgreSQL instance, applies all migrations, and runs
+92 checks covering every edit/delete authorization rule (ownership, status
+gating, role gating, input validation, sensitivity immutability, direct
+UPDATE/DELETE bypass rejection), category-routing behavior (Labs →
+Academics recalculates routing and faculty visibility follows the
+assignment rule), soft-delete visibility on every read path, identity
+hiding, and Day 3–9B regressions.
+
+### Complaint Attachments (Day 10B)
+
+Students can attach optional evidence to their complaints — up to **5 images**
+(JPG / PNG / WebP) and optionally **one video** (MP4 / WebM / MOV). Files live
+in a **PRIVATE Supabase Storage bucket** (`complaint-attachments`); the
+PostgreSQL database stores **metadata only**. There is no public bucket and
+no `getPublicUrl()` anywhere — every read goes through a **short-lived signed
+URL** (60 s) that the storage service only issues after enforcing its own
+RLS.
+
+**Storage**
+
+- Bucket `complaint-attachments` is private (`public = false`) with a 50 MB
+  bucket size cap and the six allowed MIME types as defense-in-depth.
+- Storage paths are randomized and identity-free:
+  `complaints/<complaint_uuid>/<random_uuid>.<ext>` — no emails, names,
+  student ids or profile ids ever appear in a path or filename.
+- `public.complaint_attachments` stores only `id`, `complaint_id`,
+  `storage_path`, `file_name`, `media_type`, `file_size`, `created_at` — no
+  identity columns exist at all (checked by the verification harness).
+- EXIF / GPS metadata is stripped from images client-side (canvas re-encode)
+  before the bytes are stored; if re-encoding fails the original bytes are
+  used (the randomized path + RLS remain the anonymity guarantees).
+
+**Access control (same authoritative rules as the rest of the app)**
+
+- `complaint_attachments` RLS: SELECT only, via `can_access_complaint()` —
+  the owning student, faculty only through `faculty_can_access_complaint()`
+  (department + assigned category), committee only sensitive, admin all.
+  Soft-deleted complaints return nothing (Day 10A `deleted_at is null` is
+  part of the rule), so a deleted complaint's attachments vanish from every
+  read path without ever revealing that they existed.
+- Storage object policies on the bucket mirror the same model: SELECT via
+  `can_access_complaint()` (this gates signed URLs), INSERT and DELETE only
+  for the owning student while the complaint is `submitted` (via a new
+  SECURITY DEFINER helper `can_student_manage_attachments()` — policy
+  expressions run with the caller's privileges, so the helper exists for the
+  same reason `faculty_can_access_complaint()` does). Staff / committee /
+  admin have no storage write access and get no add/remove UI.
+- Unauthorized faculty cannot read the metadata (RLS returns zero rows) and
+  cannot sign URLs (the storage SELECT policy refuses), so they cannot
+  discover that a complaint has attachments or what their paths are.
+
+**Writes (SECURITY DEFINER RPCs only — no client DML grants)**
+
+- `create_complaint_attachment(complaint_id, storage_path, file_name,
+  media_type, file_size)` verifies inside the database: authenticated,
+  role = `student`, complaint exists + not soft-deleted, ownership
+  (`student_id = auth.uid()`), status `submitted`, storage-path shape and
+  folder ownership, MIME whitelist + extension match, per-type size limits
+  (images 5 MB, video 50 MB), total 60 MB per complaint, max 5 images /
+  max 1 video — and that the uploaded object actually exists, was uploaded
+  by the caller and its **server-recorded byte size matches the claim**, so
+  a client cannot bypass the limits by lying about metadata.
+- `delete_complaint_attachment(attachment_id)` — same authorization model;
+  deletes the metadata row only and returns the path so the client can
+  remove the file. Messages / history / the complaint are never touched.
+- There is still **no INSERT / UPDATE / DELETE grant** on
+  `complaint_attachments` for any client role; direct SQL bypass attempts
+  are rejected (verified by the harness).
+
+**Upload flow (student)**
+
+1. Student fills the form and picks attachments (client-side validation
+   mirrors the server rules; invalid/oversized files are rejected
+   immediately with a message).
+2. The complaint is created through the existing secure submission flow.
+3. Files upload to the private bucket under randomized paths (the storage
+   INSERT policy only permits the owning student of a submitted complaint).
+4. Metadata is created through `create_complaint_attachment`, which re-checks
+   everything and verifies the real bytes.
+5. If any upload fails, the UI says so clearly (the complaint stays valid),
+   the failed file's orphaned bytes are removed best-effort, and the
+   attachments can be added later from the detail page while the complaint
+   is still submitted.
+
+**UI**
+
+- **Submission page**: optional "Attachments (optional)" section with
+  `[+ Add Images]` / `[+ Add Video]`, live counters (Images: x/5 · Video: x/1
+  · Total: x / 60 MB), thumbnail previews, filename + size, per-file removal,
+  and immediate rejection of invalid/oversized files. Zero attachments
+  submits exactly as before.
+- **Student detail page**: an "Attachments" section shows thumbnails (click
+  for a lightbox with prev/next) and the video player; while the complaint
+  is `submitted` the same picker is available to add more, and each item has
+  a remove control. Controls disappear once the status leaves `submitted`
+  (and the RPCs reject anyway).
+- **Staff detail page**: a read-only "Attachments" section — thumbnails,
+  lightbox, video player — for authorized staff only. No student identity,
+  no storage paths, no internal URLs, no upload/remove controls.
+- Nothing internal is ever rendered: storage paths, private URLs, uuids and
+  database identifiers stay out of the UI.
+
+**Realtime**: attachments need no global Realtime. `complaint_attachments`
+is intentionally NOT in the `supabase_realtime` publication (verified); the
+existing per-complaint status subscriptions are unchanged.
+
+Local verification:
+
+```bash
+node scripts/verify-day10b.mjs
+```
+
+This boots a throwaway PostgreSQL instance (with a faithful `storage` schema
+stub so the storage policies and the RPCs' byte verification run for real),
+applies all migrations, and runs **102 checks**: schema/bucket privacy,
+metadata + storage-object read access for every role (owner, assigned
+faculty, cross-department rejection, committee, admin, anon), create
+authorization (ownership, status gating, role gating, count/type/size/total
+limits, path-shape/owner/size server-side verification), delete
+authorization, storage INSERT/DELETE policy enforcement, soft-deleted
+complaint invisibility on every path (with rows preserved for audit), direct
+SQL bypass rejection, and Day 3–10A regressions.
+
+### Faculty Self-Registration (Day 10C)
+
+Faculty members get a **separate registration flow** at `/faculty/register`
+(linked from the login page as "Faculty Registration — authorized faculty
+only"). Unlike student signup there is **no email-domain restriction and no
+email verification** (Supabase Email Confirmation is OFF for this MVP, Day
+10E) — any email works — but a **private registration code is required**. The
+code is a secret known privately by faculty/admin: it is never hardcoded in
+React, never in a Vite env variable, never in the JS bundle, never stored in
+local/session storage, never emailed, never rendered in the UI, and never
+returned by any API. The browser submits the entered code to a SECURITY
+DEFINER RPC and **the database validates it**.
+
+**Registration-code storage/security**
+
+- `public.faculty_registration_codes` stores **only a bcrypt hash**
+  (`extensions.crypt(code, extensions.gen_salt('bf'))` via pgcrypto, ensured
+  in the canonical `extensions` schema — enabled if missing, moved there if
+  an earlier run installed it elsewhere, and called fully schema-qualified so
+  it resolves in the live project) — never the plaintext.
+- The table has **zero RLS policies and zero grants** for anon/authenticated:
+  no client role can read or modify the code through the API (verified).
+- The migration seeds **no code** (keeping the plaintext out of the repo).
+  The database owner sets/rotates it once from the **Supabase SQL editor**
+  (which runs as `postgres`, where `auth.uid()` is NULL by design):
+  ```sql
+  select public.set_faculty_registration_code('your-code');  -- 8..128 chars
+  ```
+  `set_faculty_registration_code` is executable **only by `postgres`**: its
+  EXECUTE grant is scoped to `postgres` (the SQL-editor / dashboard-owner
+  role), so the app's client roles (`anon` / `authenticated`) get a
+  permission error before the function even runs — students can never call
+  the setup mechanism. A defense-in-depth guard also refuses non-superuser
+  sessions. It returns only a boolean and stores only the hash. Until a
+  code is set, registration is refused with a friendly "not configured"
+  message.
+
+**Registration flow**
+
+1. Faculty opens `/faculty/register`, picks email / password / confirm,
+   enters the private code, picks their department (from
+   `public.departments`) and the non-sensitive categories routed to that
+   department (via `category_department_map`; sensitive categories render
+   disabled as "Sensitive — Committee only", the same treatment as the Day
+   9B admin page). At least one category is required.
+2. The app signs the user up through the **existing Supabase auth flow**
+   (the Day 3 trigger still creates the profile with `role = 'student'` —
+   nothing about student signup changes).
+3. **No email verification (Day 10E)**: Supabase Email Confirmation is
+   intentionally OFF for this MVP, so `signUp()` returns an authenticated
+   session immediately and there is NO "verify your email" step — the page
+   proceeds straight to the registration RPC. (If the email already has an
+   account, `signUp()` reports it and the page shows "This account already
+   exists. Please sign in first..." with a Sign in action — no second
+   account is ever created.)
+4. `register_faculty(registration_code, department_id, category_ids)`
+   (SECURITY DEFINER) verifies **inside the database**: authenticated
+   caller, the caller's own profile exists with `role = 'student'` (existing
+   faculty/admin/committee accounts are never touched), the code matches the
+   stored bcrypt hash, the department exists, and every category exists, is
+   non-sensitive and is mapped to the selected department (the Day 10C
+   `email_confirmed_at` requirement was removed by the Day 10E migration —
+   the private code is the authorization gate). It then **atomically** sets
+   `profiles.role = 'faculty'`,
+   `profiles.department_id` and inserts the
+   `faculty_category_assignments` rows (deduped, all-or-nothing).
+5. The user is redirected to `/staff`. After login, visibility is decided
+   entirely by the existing `faculty_can_access_complaint()` /
+   `can_access_complaint()` rules — there is no frontend filtering, and the
+   new faculty member appears in the existing admin
+   `/staff/faculty-assignments` page automatically (same table, same RPC).
+
+**What stays impossible** (all verified by the harness):
+
+- A student (or anyone) cannot `UPDATE profiles SET role = 'faculty'` — no
+  UPDATE grant exists; `register_faculty` is the only elevation path and it
+  requires the code.
+- Wrong / empty / unconfigured codes are rejected; unverified emails CAN
+  register (email confirmation is OFF — Day 10E); nonexistent departments,
+  sensitive categories, cross-department categories and zero categories are
+  rejected atomically (nothing written); duplicate category ids dedupe safely.
+- Students cannot read or modify the code table; the setup function is
+  executable only by the database owner (postgres / SQL editor) and is
+  rejected for every client role; anonymous callers are blocked from
+  `register_faculty`; the code/hash never appears in any RPC result, in
+  `src/`, in env files, or in the built JS bundle.
+
+Local verification:
+
+```bash
+node scripts/verify-day10c.mjs
+```
+
+This boots a throwaway PostgreSQL instance (with the `auth` + `storage`
+stubs), applies all migrations, and runs checks: registration-code security
+(hash-only storage, zero grants, owner-only setter via a real postgres
+session + a real `authenticated` client connection, bundle/env guard),
+registration validation (correct/wrong/empty code, unverified email allowed
+when email confirmation is OFF, role gating, department/category/sensitivity/
+cross-department/zero-category rejection, duplicate dedupe, atomicity),
+post-registration routing
+(assignment visibility, Academics isolation on detail/chat/status),
+role isolation, direct role-elevation rejection, and Day 3–10B regressions.
+
+### Faculty Registration Options (Day 10D)
+
+A small, purely additive migration that fixes the registration page's
+anonymous-load problem. The Day 3 reference-table grants
+(`departments` / `complaint_categories` / `category_department_map`) are
+`authenticated`-only, so a visitor who opens `/faculty/register` before
+signing up got a permission error and the page showed "Could not load the
+registration options." Day 10D adds ONE new read-only SECURITY DEFINER RPC,
+`public.get_faculty_registration_options()`, executable by **anon** and
+**authenticated**, that returns exactly the public reference data the form
+needs — each department and the complaint categories routed to it via the
+existing `category_department_map` / `complaint_categories` tables (`id`,
+`name`, `is_sensitive`) — and nothing else: no identity, no registration
+code/hash, no write path. No existing grants, policies or functions are
+modified; anonymous gains no table access, only this one function.
+
+The registration page now resolves the **ECS department automatically from
+the database** (no dropdown, no hardcoded uuid — the id and name come from
+the RPC rows), displays it as a read-only field, and loads only the ECS
+categories. This display is purely presentational: `register_faculty` still
+re-validates the department and every category, the code, the student role
+and the sensitive-category / cross-department rules server-side before
+atomically elevating the profile (no email-verification requirement since
+Day 10E). The `verify-day10c.mjs`
+harness now also applies the Day 10D migration and checks the anonymous +
+authenticated read paths and the returned columns.
+
+### Not implemented yet (Day 11+)
 
 Notifications, push notifications, identity-reveal UI, analytics, duplicate
-detection, public complaint board, admin/faculty account management, file
-upload UI, and a full admin dashboard. The schema is ready for these.
+detection, public complaint board, admin account management UI (faculty
+self-register via the private code instead), and a full admin dashboard. The
+schema is ready for these.
 
 ## Authentication (Day 2)
 
 - Students self-register with a college email (`@gprec.ac.in`), password, and
   password confirmation. Other domains are rejected.
-- Supabase's **Confirm email** setting is enabled, so new accounts must verify
-  their email before the first sign-in (users are intentionally not signed in
-  automatically after registering).
+- Supabase's **Confirm email** setting is enabled for STUDENT signups, so new
+  student accounts must verify their email before the first sign-in (users
+  are intentionally not signed in automatically after registering).
+- Faculty registration (Day 10C / Day 10E) is DIFFERENT: it does NOT require
+  email verification — the private faculty registration code is the
+  authorization gate. `signUp()` returns a session immediately and the page
+  runs `register_faculty()` right away; there is no "verify your email" step.
+- Faculty do NOT use this student page — they register at `/faculty/register`
+  (Day 10C) with any email plus the private faculty registration code. The
+  role after login always comes from `public.profiles.role` (the
+  `register_faculty` RPC is the only path that sets it to `faculty`).
 - Login errors are intentionally generic ("Invalid email or password.") so the
   UI never reveals whether an email exists.
 - Forgot password uses Supabase's password-reset flow; the recovery link
@@ -643,32 +1028,39 @@ Unknown routes redirect to `/login`.
 │   ├── verify-day8.mjs       # Local Postgres verification harness (Day 8A)
 │   ├── verify-day8b.mjs      # Local Postgres verification harness (Day 8B)
 │   ├── verify-day9.mjs       # Local Postgres verification harness (Day 9)
-│   └── verify-day9b.mjs      # Local Postgres verification harness (Day 9B)
+│   ├── verify-day9b.mjs      # Local Postgres verification harness (Day 9B)
+│   ├── verify-day10a.mjs     # Local Postgres verification harness (Day 10A)
+│   ├── verify-day10b.mjs     # Local Postgres verification harness (Day 10B)
+│   └── verify-day10c.mjs     # Local Postgres verification harness (Day 10C + 10D)
 └── src/
     ├── main.jsx              # React root + BrowserRouter
     ├── App.jsx               # Route definitions + AuthProvider
     ├── index.css             # Tailwind entry (@import "tailwindcss")
     ├── lib/
     │   ├── supabaseClient.js  # Supabase client (env-driven, anon key only)
-    │   ├── authService.js     # Auth actions + role resolution from profiles
-    │   ├── complaintService.js# Day 4-7: categories, submission, dashboards, status, chat
-    │   └── format.js          # Day 5: shared date formatting
+    │   ├── authService.js     # Auth actions + role resolution + Day 10C registerFaculty
+    │   ├── complaintService.js# Day 4-10C: categories, submission, dashboards, status, chat, attachments, departments
+    │   └── format.js          # Day 5: shared date + file-size formatting
     ├── context/
     │   └── AuthContext.jsx    # AuthProvider / useAuth (session, role, actions)
     ├── hooks/
-    │   └── useComplaintChat.js# Day 7: chat state (load, Realtime, dedupe, send)
+    │   ├── useComplaintChat.js# Day 7: chat state (load, Realtime, dedupe, send)
+    │   └── useAttachmentSelection.js # Day 10B: attachment draft picker state + validation
     ├── components/
     │   ├── layout/
     │   │   └── AppLayout.jsx  # Shared role-aware layout (header/nav/footer)
     │   ├── complaints/
     │   │   ├── Badges.jsx     # Day 5: status/priority/sensitive badges
-    │   │   └── ComplaintChat.jsx  # Day 7: anonymous chat UI (student + staff)
+    │   │   ├── ComplaintChat.jsx  # Day 7: anonymous chat UI (student + staff)
+    │   │   ├── AttachmentDraftPicker.jsx  # Day 10B: picker UI shared by student pages
+    │   │   └── ComplaintAttachments.jsx   # Day 10B: thumbnails/lightbox/video display
     │   ├── ProtectedRoute.jsx # Role-aware route guards (Protected + PublicOnly)
     │   ├── LoadingScreen.jsx  # Session-check loading state
     │   └── PagePlaceholder.jsx
     └── pages/
         ├── LoginPage.jsx
         ├── RegisterPage.jsx
+        ├── FacultyRegisterPage.jsx  # Day 10C: faculty self-registration
         ├── ForgotPasswordPage.jsx
         ├── UpdatePasswordPage.jsx
         ├── StudentPage.jsx    # Day 5: student dashboard

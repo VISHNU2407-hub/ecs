@@ -2,11 +2,18 @@ import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext.jsx'
 import {
+  MAX_IMAGES_PER_COMPLAINT,
+  MAX_IMAGE_SIZE_BYTES,
+  MAX_VIDEO_SIZE_BYTES,
   MIN_DESCRIPTION_LENGTH,
   PRIORITY_LEVELS,
   fetchComplaintCategories,
   submitComplaint,
+  uploadComplaintAttachment,
 } from '../lib/complaintService.js'
+import { formatFileSize } from '../lib/format.js'
+import AttachmentDraftPicker from '../components/complaints/AttachmentDraftPicker.jsx'
+import useAttachmentSelection from '../hooks/useAttachmentSelection.js'
 
 const PRIORITY_OPTIONS = [
   { value: 'low', label: 'Low' },
@@ -52,6 +59,26 @@ export default function SubmitComplaintPage() {
   const [submitting, setSubmitting] = useState(false)
   // The created complaint row: { id, ticket_number, status }.
   const [result, setResult] = useState(null)
+
+  // Day 10B — attachment drafts (validated client-side) + the upload
+  // orchestration that runs AFTER the complaint row is created.
+  const {
+    images,
+    video,
+    imageCount,
+    videoCount,
+    totalSize,
+    pickerError,
+    addImages,
+    addVideo,
+    removeImage,
+    removeVideo,
+    clear: clearAttachments,
+  } = useAttachmentSelection()
+  const [finalizing, setFinalizing] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState('')
+  const [uploadError, setUploadError] = useState('')
+  const [attachmentsUploaded, setAttachmentsUploaded] = useState(0)
 
   // In-flight guard so two rapid clicks cannot submit twice, on top of the
   // disabled submit button (which covers the common double-click case).
@@ -148,6 +175,44 @@ export default function SubmitComplaintPage() {
         description: description.trim(),
         priority,
       })
+
+      // Day 10B — if the student picked attachments, upload them NOW, right
+      // after the complaint exists, through the secure flow: private bucket
+      // upload (RLS + randomized path) then the metadata RPC. The complaint
+      // itself is already valid either way, so a failed attachment never
+      // fails the complaint — it is reported clearly and can be added later
+      // from the detail page while the complaint is still submitted.
+      const drafts = [
+        ...images.map((draft) => draft.file),
+        ...(video ? [video.file] : []),
+      ]
+      if (drafts.length > 0) {
+        setFinalizing(true)
+        let failed = 0
+        let uploaded = 0
+        for (let i = 0; i < drafts.length; i += 1) {
+          try {
+            await uploadComplaintAttachment(created.id, drafts[i])
+            uploaded += 1
+            setUploadProgress(`Uploaded ${i + 1} of ${drafts.length} attachments…`)
+          } catch (err) {
+            failed += 1
+            // The failed file's bytes are cleaned up inside
+            // uploadComplaintAttachment (orphan handling); already-uploaded
+            // attachments are valid and stay attached.
+            console.error('[complaints] attachment upload failed', err)
+          }
+        }
+        setAttachmentsUploaded(uploaded)
+        setFinalizing(false)
+        if (failed > 0) {
+          setUploadError(
+            `${failed} of ${drafts.length} attachment(s) could not be uploaded. Your complaint is saved as ${created.ticket_number} — you can add the attachments from the complaint detail page while it is still submitted.`,
+          )
+        }
+        clearAttachments()
+      }
+
       setResult(created)
     } catch (err) {
       // Never surface raw database errors to the user.
@@ -166,6 +231,32 @@ export default function SubmitComplaintPage() {
     setFieldErrors({})
     setSubmitError('')
     setResult(null)
+    clearAttachments()
+    setFinalizing(false)
+    setUploadProgress('')
+    setUploadError('')
+    setAttachmentsUploaded(0)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Finalizing state — the complaint exists (valid!), its optional
+  // attachments are being uploaded. The success screen only appears once the
+  // uploads finish so nothing is hidden mid-flow.
+  // ---------------------------------------------------------------------------
+  if (finalizing) {
+    return (
+      <div className="mx-auto w-full max-w-xl">
+        <div className="flex items-center justify-center gap-3 rounded-lg border border-gray-200 bg-white p-10 shadow-sm">
+          <div
+            aria-hidden="true"
+            className="h-5 w-5 animate-spin rounded-full border-2 border-blue-600 border-t-transparent"
+          />
+          <p className="text-sm text-gray-600">
+            {uploadProgress || 'Uploading attachments…'}
+          </p>
+        </div>
+      </div>
+    )
   }
 
   // ---------------------------------------------------------------------------
@@ -203,6 +294,20 @@ export default function SubmitComplaintPage() {
               The ECS department will review your complaint. Keep your ticket number for
               reference.
             </p>
+            {/* Day 10B — attachment upload outcome. A complaint with no
+                attachments submits exactly as before; with attachments, the
+                outcome is never hidden. */}
+            {attachmentsUploaded > 0 && !uploadError && (
+              <p role="status" className="mt-3 text-sm font-medium text-green-700">
+                All {attachmentsUploaded} attachment{attachmentsUploaded === 1 ? '' : 's'} uploaded
+                successfully.
+              </p>
+            )}
+            {uploadError && (
+              <p role="alert" className="mt-3 text-sm text-amber-700">
+                {uploadError}
+              </p>
+            )}
             <div className="mt-6 flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
               <Link
                 to="/student"
@@ -346,6 +451,38 @@ export default function SubmitComplaintPage() {
               </p>
             )}
           </div>
+
+          {/* Day 10B — optional evidence attachments. Client-side validation
+              mirrors the database rules (the RPC is authoritative); files are
+              uploaded to the PRIVATE bucket with randomized paths, and only
+              the metadata ever reaches the database. Zero attachments behaves
+              exactly as before. */}
+          <fieldset className="space-y-4 rounded-md border border-gray-200 p-4">
+            <legend className="px-1 text-sm font-medium text-gray-700">
+              Attachments <span className="font-normal text-gray-500">(optional)</span>
+            </legend>
+            <p className="text-xs text-gray-500">
+              Add evidence — up to {MAX_IMAGES_PER_COMPLAINT} images (max{' '}
+              {formatFileSize(MAX_IMAGE_SIZE_BYTES)} each) and optionally one
+              video (max {formatFileSize(MAX_VIDEO_SIZE_BYTES)}). Files are
+              private: only the ECS team handling your complaint can view
+              them, and your identity is never attached.
+            </p>
+
+            <AttachmentDraftPicker
+              images={images}
+              video={video}
+              imageCount={imageCount}
+              videoCount={videoCount}
+              totalSize={totalSize}
+              pickerError={pickerError}
+              addImages={addImages}
+              addVideo={addVideo}
+              removeImage={removeImage}
+              removeVideo={removeVideo}
+              disabled={submitting || finalizing}
+            />
+          </fieldset>
 
           {submitError && (
             <div

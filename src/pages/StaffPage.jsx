@@ -78,10 +78,15 @@ export default function StaffPage() {
     }
   }, [])
 
+  const loadingRef = useRef(false)
+
   async function loadComplaints() {
+    loadingRef.current = true
     setLoading(true)
     setError('')
     try {
+      // RLS on the staff view excludes soft-deleted complaints, so a deleted
+      // complaint never appears here (and never leaks that it existed).
       const rows = await fetchStaffComplaints()
       if (!mountedRef.current) return
       setComplaints(rows)
@@ -91,6 +96,7 @@ export default function StaffPage() {
       if (!mountedRef.current) return
       setError('Could not load complaints. Please try again.')
     } finally {
+      loadingRef.current = false
       if (mountedRef.current) setLoading(false)
     }
   }
@@ -99,6 +105,35 @@ export default function StaffPage() {
     loadComplaints()
     // Load once on mount; the retry button re-runs loadComplaints.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Day 10A — refetch quietly when the tab regains focus, so a complaint
+  // deleted by its student (or status-changed by a colleague) in another
+  // tab/session disappears from this already-open dashboard without a manual
+  // refresh. Realtime cannot deliver the soft-delete event (RLS drops events
+  // for rows the subscriber can no longer see), so this refocus refetch is
+  // the honest mechanism. Staff are never told a complaint was deleted — it
+  // simply stops appearing.
+  useEffect(() => {
+    function onVisibility() {
+      if (document.visibilityState === 'visible' && !loadingRef.current) {
+        fetchStaffComplaints()
+          .then((rows) => {
+            if (mountedRef.current) setComplaints(rows)
+          })
+          .catch((err) => {
+            // Quiet failure — keep the current list; the retry path still
+            // exists on the explicit error state.
+            console.error('[staff-dashboard] background refresh failed', err)
+          })
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('focus', onVisibility)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('focus', onVisibility)
+    }
   }, [])
 
   // Category options are derived from the loaded (identity-free) data — never

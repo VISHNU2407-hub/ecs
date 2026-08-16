@@ -7,6 +7,140 @@ export const PRIORITY_LEVELS = ['low', 'medium', 'high', 'urgent']
 // only — the database does not enforce a length.
 export const MIN_DESCRIPTION_LENGTH = 20
 
+// Day 10A — complaint title/description limits. Mirrored from the edit RPC
+// (public.edit_complaint), which is the authoritative validator; the UI uses
+// these only to guide the user before the RPC enforces them.
+export const TITLE_MAX_LENGTH = 200
+export const DESCRIPTION_MAX_LENGTH = 10000
+
+// ---------------------------------------------------------------------------
+// Day 10B — complaint attachments (images + optional video).
+//
+// Files live in the PRIVATE Supabase Storage bucket `complaint-attachments`
+// under randomized paths (complaints/<complaint_uuid>/<random_uuid>.<ext> —
+// never any identity), and the DATABASE stores metadata only, in
+// public.complaint_attachments. There is no public bucket and no
+// getPublicUrl() anywhere; every read goes through a SHORT-LIVED signed URL
+// created AFTER the storage service has enforced its RLS
+// (can_access_complaint on the complaint parsed from the path). Writes go
+// EXCLUSIVELY through the Day 10B SECURITY DEFINER RPCs
+// (create_complaint_attachment / delete_complaint_attachment), which
+// re-verify ownership, submitted status, type/size/count limits and the
+// real uploaded bytes server-side.
+//
+// The limits below are mirrored from the RPC (the authoritative validator)
+// and the bucket config; the UI uses them only to give instant feedback
+// before the database rejects a bad file.
+// ---------------------------------------------------------------------------
+
+// Private storage bucket for complaint evidence files (never public).
+export const ATTACHMENT_BUCKET = 'complaint-attachments'
+
+// Allowed MIME types (must match the migration's whitelist exactly).
+export const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp']
+export const ALLOWED_VIDEO_TYPES = ['video/mp4', 'video/webm', 'video/quicktime']
+
+// Per-complaint limits (enforced server-side by the RPC).
+export const MAX_IMAGES_PER_COMPLAINT = 5
+export const MAX_VIDEOS_PER_COMPLAINT = 1
+export const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024 // 5 MB
+export const MAX_VIDEO_SIZE_BYTES = 50 * 1024 * 1024 // 50 MB
+export const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = 60 * 1024 * 1024 // 60 MB
+
+// Signed URLs expire quickly and are never persisted anywhere.
+export const ATTACHMENT_SIGNED_URL_TTL_SECONDS = 60
+
+// Maps a MIME type to the storage extensions the RPC accepts for it.
+const EXTENSIONS_BY_TYPE = {
+  'image/jpeg': ['jpg', 'jpeg'],
+  'image/png': ['png'],
+  'image/webp': ['webp'],
+  'video/mp4': ['mp4'],
+  'video/webm': ['webm'],
+  'video/quicktime': ['mov'],
+}
+
+export function isImageType(type) {
+  return ALLOWED_IMAGE_TYPES.includes(type)
+}
+
+export function isVideoType(type) {
+  return ALLOWED_VIDEO_TYPES.includes(type)
+}
+
+// Returns the storage extension to use for a File, or null when the MIME
+// type is not allowed. Prefers the file's own extension when it is valid
+// for the type (e.g. .jpeg for image/jpeg), else the type's default.
+export function attachmentExtensionFor(file) {
+  const allowed = EXTENSIONS_BY_TYPE[file?.type]
+  if (!allowed) return null
+  const own = String(file.name ?? '').split('.').pop()?.toLowerCase() ?? ''
+  return allowed.includes(own) ? own : allowed[0]
+}
+
+// Random lowercase UUID for the storage file name (identity-free).
+function randomUuid() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0
+    const v = c === 'x' ? r : (r & 0x3) | 0x8
+    return v.toString(16)
+  })
+}
+
+/**
+ * Day 10B — strips EXIF / location metadata from an image by re-encoding it
+ * through a canvas, so the stored file never carries GPS/device/identity
+ * metadata. Best effort: if the browser cannot decode or re-encode the
+ * image, the original bytes are returned (and the randomized storage path
+ * still guarantees the path itself carries no identity).
+ */
+export async function stripImageMetadata(file) {
+  if (!file || !isImageType(file.type)) return file
+  try {
+    let bitmap = null
+    if (typeof createImageBitmap === 'function') {
+      bitmap = await createImageBitmap(file)
+    } else {
+      // Fallback for environments without createImageBitmap.
+      const url = URL.createObjectURL(file)
+      try {
+        const img = await new Promise((resolve, reject) => {
+          const image = new Image()
+          image.onload = () => resolve(image)
+          image.onerror = () => reject(new Error('image decode failed'))
+          image.src = url
+        })
+        bitmap = img
+      } finally {
+        URL.revokeObjectURL(url)
+      }
+    }
+    const canvas = document.createElement('canvas')
+    canvas.width = bitmap.width || 1
+    canvas.height = bitmap.height || 1
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(bitmap, 0, 0)
+    if (typeof bitmap.close === 'function') bitmap.close()
+
+    // Re-encode to the original type when the browser supports it; PNG keeps
+    // transparency, otherwise fall back to PNG, then to the original file.
+    const encoders = file.type === 'image/png' ? ['image/png'] : [file.type, 'image/png']
+    for (const encoder of encoders) {
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, encoder, 0.92))
+      if (blob) return blob
+    }
+    return file
+  } catch (err) {
+    // Never block an upload because metadata stripping failed; the random
+    // path + RLS are the real anonymity controls.
+    console.warn('[attachments] EXIF strip failed, uploading original bytes', err)
+    return file
+  }
+}
+
 function ensureSupabase() {
   if (!supabase) {
     throw new Error(
@@ -33,6 +167,47 @@ export async function fetchComplaintCategories() {
     .from('complaint_categories')
     .select('id, name')
     .order('name', { ascending: true })
+  if (error) throw error
+  return data ?? []
+}
+
+/**
+ * Day 10C — loads the departments a faculty member may pick during
+ * registration. The database (public.departments) is the source of truth —
+ * nothing is hardcoded in the frontend, no fake departments are added, and
+ * the register_faculty RPC re-validates the chosen department server-side.
+ * Readable by any signed-in user via the Day 3 RLS policy.
+ */
+export async function fetchDepartments() {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .from('departments')
+    .select('id, name')
+    .order('name', { ascending: true })
+  if (error) throw error
+  return data ?? []
+}
+
+/**
+ * Day 10D — loads the faculty registration options for /faculty/register
+ * through the SECURITY DEFINER RPC public.get_faculty_registration_options().
+ *
+ * This is the ONLY anonymous-readable reference-data path: the registration
+ * page must render "Department: ECS" + the ECS complaint categories before a
+ * visitor has signed up / signed in, and the Day 3 grants on the reference
+ * tables are `authenticated`-only. The RPC (executable by anon + authenticated)
+ * returns one row per (department, category routed to it) from the existing
+ * public.departments / public.complaint_categories / public.category_department_map
+ * tables — id + name + is_sensitive only, no identity, no registration
+ * code/hash. It is NOT authorization for anything: register_faculty still
+ * re-validates the department and every category server-side.
+ *
+ * Returns rows of the shape:
+ *   { department_id, department_name, category_id, category_name, is_sensitive }
+ */
+export async function fetchFacultyRegistrationOptions() {
+  const client = ensureSupabase()
+  const { data, error } = await client.rpc('get_faculty_registration_options')
   if (error) throw error
   return data ?? []
 }
@@ -157,7 +332,7 @@ export async function fetchStudentComplaintDetail(complaintId) {
   const { data, error } = await client
     .from('complaints')
     .select(
-      'id, ticket_number, category_id, priority, status, created_at, updated_at, complaint_categories(name)',
+      'id, ticket_number, category_id, title, description, priority, status, created_at, updated_at, complaint_categories(name)',
     )
     .eq('id', complaintId)
     .maybeSingle()
@@ -168,6 +343,8 @@ export async function fetchStudentComplaintDetail(complaintId) {
     ticket_number: data.ticket_number,
     category_id: data.category_id,
     category: data.complaint_categories?.name ?? null,
+    title: data.title ?? '',
+    description: data.description ?? '',
     priority: data.priority,
     status: data.status,
     created_at: data.created_at,
@@ -211,7 +388,7 @@ export async function fetchStaffComplaintDetail(complaintId) {
   const { data, error } = await client
     .from('complaints_staff_view')
     .select(
-      'id, ticket_number, category, department, description, priority, status, handler_type, is_sensitive, created_at, updated_at',
+      'id, ticket_number, category, department, title, description, priority, status, handler_type, is_sensitive, created_at, updated_at',
     )
     .eq('id', complaintId)
     .maybeSingle()
@@ -545,6 +722,65 @@ export async function setFacultyCategoryAssignments(targetFacultyId, categoryIds
   return data ?? []
 }
 
+// ---------------------------------------------------------------------------
+// Day 10A — Complaint Edit & Delete (student, own submitted complaints)
+//
+// Editing and deleting a complaint are STUDENT actions that go EXCLUSIVELY
+// through the Day 10A SECURITY DEFINER RPCs (edit_complaint /
+// delete_complaint). The client submits only the editable values (or the
+// complaint id for delete); the database verifies INSIDE each function that
+// the caller is authenticated, has role 'student', OWNS the complaint
+// (student_id = auth.uid() — the user id is never accepted from the client),
+// that the complaint exists, is not soft-deleted, and is currently
+// 'submitted'. There is still no direct UPDATE/DELETE grant on
+// public.complaints, so the RPCs are the only write paths. Deletion is a
+// SOFT delete (deleted_at + deleted_by_role set atomically; the row and its
+// messages/history are never physically removed) and every read path —
+// dashboards, detail pages, chat, history, direct URLs — returns the same
+// empty "not found / no access" result for deleted complaints.
+// ---------------------------------------------------------------------------
+
+/**
+ * Day 10A — student edits their OWN submitted complaint. Only title,
+ * description, category and priority may change; the SECURITY DEFINER RPC
+ * validates every input, re-derives category routing (is_sensitive /
+ * handler_type / department_id) from the new category using the same
+ * database derivation as submission, and returns ONLY safe fields:
+ *   { id, ticket_number, category_id, department_id, title, description,
+ *     priority, status, handler_type, is_sensitive, created_at, updated_at }
+ */
+export async function editComplaint(complaintId, { title, description, categoryId, priority }) {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .rpc('edit_complaint', {
+      p_complaint_id: complaintId,
+      p_new_title: title,
+      p_new_description: description,
+      p_new_category_id: categoryId,
+      p_new_priority: priority,
+    })
+    .single()
+  if (error) throw error
+  return data
+}
+
+/**
+ * Day 10A — student soft-deletes their OWN submitted complaint. The RPC
+ * verifies ownership + current status inside the database and sets
+ * deleted_at / deleted_by_role atomically (the row is never physically
+ * removed). Returns { ticket_number, status, deleted_at } so the page can
+ * confirm and navigate away — the complaint disappears from every read path
+ * immediately (RLS).
+ */
+export async function deleteComplaint(complaintId) {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .rpc('delete_complaint', { p_complaint_id: complaintId })
+    .single()
+  if (error) throw error
+  return data
+}
+
 /**
  * Day 9B — loads the category -> department routing table so the admin UI can
  * render only the checkboxes for categories that actually belong to each
@@ -573,4 +809,147 @@ export async function fetchCategoriesWithSensitivity() {
     .order('name', { ascending: true })
   if (error) throw error
   return data ?? []
+}
+
+// ---------------------------------------------------------------------------
+// Day 10B — Complaint attachments (images + optional video)
+//
+// Files are stored in the PRIVATE bucket `complaint-attachments` under
+// randomized paths (complaints/<complaint_uuid>/<random_uuid>.<ext> — never
+// any identity); the database stores METADATA ONLY in
+// public.complaint_attachments. Reads go through RLS-scoped queries plus
+// short-lived signed URLs (the storage service re-checks authorization on
+// every signed-URL request). Writes go EXCLUSIVELY through the Day 10B
+// SECURITY DEFINER RPCs (create_complaint_attachment /
+// delete_complaint_attachment) — the client has no INSERT/UPDATE/DELETE
+// grant on complaint_attachments and never sends student_id or any identity.
+//
+// Metadata rows expose `storage_path` (random, identity-free) because the
+// client needs it to request a signed URL; it is never rendered in the UI.
+// ---------------------------------------------------------------------------
+
+/**
+ * Day 10B — fetches the attachment metadata for one complaint. Row
+ * visibility is enforced ENTIRELY by RLS (can_access_complaint): the owner
+ * sees their own, faculty only assigned-category complaints, committee only
+ * sensitive ones, admin all; soft-deleted complaints return nothing. Returns
+ * safe, identity-free rows:
+ *   { id, complaint_id, storage_path, file_name, media_type, file_size,
+ *     created_at }
+ */
+export async function fetchComplaintAttachments(complaintId) {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .from('complaint_attachments')
+    .select('id, complaint_id, storage_path, file_name, media_type, file_size, created_at')
+    .eq('complaint_id', complaintId)
+    .order('created_at', { ascending: true })
+  if (error) throw error
+  return data ?? []
+}
+
+/**
+ * Day 10B — creates a SHORT-LIVED signed URL for ONE attachment. The
+ * storage service re-checks its RLS before signing: a caller who cannot
+ * access the complaint (via can_access_complaint on the path's complaint
+ * id) gets nothing, so paths can never be signed by unauthorized users. The
+ * URL expires after ATTACHMENT_SIGNED_URL_TTL_SECONDS and is never persisted.
+ */
+export async function getAttachmentSignedUrl(attachment) {
+  const client = ensureSupabase()
+  const { data, error } = await client.storage
+    .from(ATTACHMENT_BUCKET)
+    .createSignedUrl(attachment.storage_path, ATTACHMENT_SIGNED_URL_TTL_SECONDS)
+  if (error) throw error
+  return data?.signedUrl ?? null
+}
+
+/**
+ * Day 10B — uploads ONE attachment for a complaint and registers its
+ * metadata.
+ *
+ * Flow: (1) client-side type/size checks (mirrors of the server rules),
+ * (2) EXIF-strip images by re-encoding, (3) upload the bytes to the PRIVATE
+ * bucket under a randomized path (the storage INSERT policy only permits the
+ * OWNING student of a submitted complaint), (4) create the metadata row via
+ * the SECURITY DEFINER RPC, which re-verifies ownership/status/limits AND
+ * checks the real uploaded bytes (owner + size) before accepting.
+ *
+ * If the RPC rejects the file (e.g. a limit the client missed), the just-
+ * uploaded object is removed again (orphan cleanup) before re-throwing, so
+ * no orphan file is left behind.
+ *
+ * Returns the metadata row (safe fields only).
+ */
+export async function uploadComplaintAttachment(complaintId, file) {
+  const client = ensureSupabase()
+  const ext = attachmentExtensionFor(file)
+  if (!ext) {
+    throw new Error('This file type is not supported. Use JPG, PNG or WebP images, or MP4, WebM or MOV video.')
+  }
+
+  // Randomized, identity-free storage path.
+  const storagePath = `complaints/${complaintId}/${randomUuid()}.${ext}`
+
+  // Strip EXIF/location metadata from images before permanent storage.
+  const blob = await stripImageMetadata(file)
+
+  // 1. Upload the bytes. The storage INSERT policy authorizes the owning
+  //    student of a submitted complaint only.
+  const { error: uploadError } = await client.storage
+    .from(ATTACHMENT_BUCKET)
+    .upload(storagePath, blob, { contentType: file.type, upsert: false })
+  if (uploadError) throw uploadError
+
+  // 2. Register the metadata through the RPC (authoritative validator). The
+  //    size sent is the re-encoded blob's size — the same bytes the storage
+  //    service recorded, so the RPC's server-side size check always passes
+  //    for honest uploads.
+  try {
+    const { data, error } = await client
+      .rpc('create_complaint_attachment', {
+        p_complaint_id: complaintId,
+        p_storage_path: storagePath,
+        p_file_name: file.name,
+        p_media_type: file.type,
+        p_file_size: blob.size,
+      })
+      .single()
+    if (error) throw error
+    return data
+  } catch (err) {
+    // 3. Orphan cleanup: the bytes exist but no metadata row was created, so
+    //    the file is unreachable through the app — remove it best-effort.
+    try {
+      await client.storage.from(ATTACHMENT_BUCKET).remove([storagePath])
+    } catch (cleanupErr) {
+      console.warn('[attachments] failed to clean up orphaned upload', cleanupErr)
+    }
+    throw err
+  }
+}
+
+/**
+ * Day 10B — removes ONE attachment: the RPC (SECURITY DEFINER) verifies
+ * ownership/status and deletes the metadata row, then the file object is
+ * removed from the bucket best-effort (the storage DELETE policy allows the
+ * owning student while the complaint is submitted). If the file removal
+ * fails the orphan is unreachable (no metadata), so the app is never left in
+ * a wrong state. Returns the RPC's safe row (includes storage_path).
+ */
+export async function deleteComplaintAttachment(attachment) {
+  const client = ensureSupabase()
+  const { data, error } = await client
+    .rpc('delete_complaint_attachment', { p_attachment_id: attachment.id })
+    .single()
+  if (error) throw error
+  const storagePath = data?.storage_path
+  if (storagePath) {
+    try {
+      await client.storage.from(ATTACHMENT_BUCKET).remove([storagePath])
+    } catch (err) {
+      console.warn('[attachments] metadata removed but file cleanup failed', err)
+    }
+  }
+  return data
 }

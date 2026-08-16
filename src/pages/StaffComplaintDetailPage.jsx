@@ -6,9 +6,11 @@ import {
   STATUS_LABELS,
   StatusBadge,
 } from '../components/complaints/Badges.jsx'
+import ComplaintAttachments from '../components/complaints/ComplaintAttachments.jsx'
 import ComplaintChat from '../components/complaints/ComplaintChat.jsx'
 import { useAuth } from '../context/AuthContext.jsx'
 import {
+  fetchComplaintAttachments,
   fetchComplaintStatusHistory,
   fetchStaffComplaintDetail,
   getNextStatuses,
@@ -56,6 +58,12 @@ export default function StaffComplaintDetailPage() {
   const [history, setHistory] = useState([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
+
+  // Day 10B — attachments (read-only for staff; RLS decides visibility via
+  // can_access_complaint -> faculty_can_access_complaint for faculty).
+  const [attachments, setAttachments] = useState([])
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false)
+  const [attachmentsError, setAttachmentsError] = useState('')
 
   const [selectedStatus, setSelectedStatus] = useState('')
   const [updating, setUpdating] = useState(false)
@@ -114,6 +122,32 @@ export default function StaffComplaintDetailPage() {
   useEffect(() => {
     loadDetail()
     // Load once per complaint id; the retry button re-runs loadDetail.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id])
+
+  // Day 10B — load attachment metadata. RLS returns rows only for complaints
+  // this staff member can access (faculty -> assigned categories only), and
+  // none at all for soft-deleted complaints — an unauthorized faculty member
+  // gets the same empty result as a missing complaint, so attachment paths
+  // and files can never be discovered.
+  async function loadAttachments() {
+    setAttachmentsLoading(true)
+    setAttachmentsError('')
+    try {
+      const rows = await fetchComplaintAttachments(id)
+      if (mountedRef.current) setAttachments(rows)
+    } catch (err) {
+      console.error('[staff-detail] failed to load attachments', err)
+      if (mountedRef.current) {
+        setAttachmentsError('Could not load attachments for this complaint.')
+      }
+    } finally {
+      if (mountedRef.current) setAttachmentsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadAttachments()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
@@ -221,14 +255,23 @@ export default function StaffComplaintDetailPage() {
         </Link>
       </div>
 
-      {/* Header — ticket + badges */}
+      {/* Header — ticket + badges. Day 10A: `title` is a safe (identity-free)
+          field added to complaints_staff_view; a soft-deleted complaint never
+          renders here because the view's RLS excludes it (same "not found"
+          state as any other inaccessible complaint). Staff have NO edit /
+          delete controls — they simply stop seeing the complaint. */}
       <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
+          <div className="min-w-0">
             <h1 className="font-mono text-xl font-semibold text-gray-900">
               {complaint.ticket_number}
             </h1>
             <p className="mt-1 text-sm text-gray-600">{complaint.category ?? '—'}</p>
+            {complaint.title && (
+              <p className="mt-1 text-sm font-medium text-gray-800">
+                {complaint.title}
+              </p>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <PriorityBadge priority={complaint.priority} />
@@ -255,6 +298,26 @@ export default function StaffComplaintDetailPage() {
           </p>
         </div>
       </div>
+
+      {/* Day 10B — attachments, read-only. Authorized staff see image
+          thumbnails (click for a lightbox) and the video player via
+          short-lived signed URLs; they never see student identity, storage
+          paths or internal URLs, and they get no add/remove controls. */}
+      {attachmentsError && (
+        <div
+          role="alert"
+          className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700 shadow-sm"
+        >
+          {attachmentsError}
+        </div>
+      )}
+      {attachmentsLoading && attachments.length === 0 ? (
+        <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+          <p className="text-sm text-gray-500">Loading attachments…</p>
+        </div>
+      ) : (
+        <ComplaintAttachments attachments={attachments} />
+      )}
 
       {/* Day 9 — escalated notice. Drawn attention to complaints the
           automatic escalation (or a staff member) escalated, so admin/staff

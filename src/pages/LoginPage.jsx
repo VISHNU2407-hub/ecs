@@ -121,6 +121,20 @@ export default function LoginPage() {
             Create a student account
           </Link>
         </p>
+
+        {/* Day 10C — faculty registration entry point. Clearly marked as
+            authorized-faculty-only (a private registration code is required)
+            so it is not mistaken for a normal student signup. */}
+        <p className="mt-3 text-center text-sm text-gray-600">
+          Are you a faculty member?{' '}
+          <Link
+            to="/faculty/register"
+            className="font-medium text-blue-600 hover:text-blue-700"
+          >
+            Faculty Registration
+          </Link>
+          <span className="ml-1 text-xs text-gray-400">(authorized faculty only)</span>
+        </p>
       </div>
     </div>
   )

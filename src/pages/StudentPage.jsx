@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext.jsx'
 import { PriorityBadge, StatusBadge } from '../components/complaints/Badges.jsx'
 import { fetchStudentComplaints } from '../lib/complaintService.js'
@@ -32,12 +32,20 @@ function SummaryCard({ label, value, description, accentClasses }) {
  */
 export default function StudentPage() {
   const { user } = useAuth()
+  const location = useLocation()
+  const navigate = useNavigate()
 
   const [complaints, setComplaints] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  // Day 10A — ticket number of a complaint just deleted on the detail page
+  // (passed through router state), shown once as a success banner.
+  const [deletedTicket, setDeletedTicket] = useState(
+    location.state?.deletedTicket ?? null,
+  )
 
   const mountedRef = useRef(true)
+  const loadingRef = useRef(false)
 
   useEffect(() => {
     mountedRef.current = true
@@ -48,12 +56,14 @@ export default function StudentPage() {
 
   async function loadComplaints() {
     if (!user) return
+    loadingRef.current = true
     setLoading(true)
     setError('')
     try {
-      // RLS (student_id = auth.uid()) returns only this student's rows; the
-      // query itself has no ownership filter because student_id is not a
-      // selectable column (Day 3 column grants).
+      // RLS (student_id = auth.uid() AND deleted_at is null) returns only
+      // this student's non-deleted rows; the query itself has no ownership
+      // filter because student_id is not a selectable column (Day 3 column
+      // grants). Soft-deleted complaints simply never arrive.
       const rows = await fetchStudentComplaints()
       if (!mountedRef.current) return
       setComplaints(rows)
@@ -63,6 +73,7 @@ export default function StudentPage() {
       if (!mountedRef.current) return
       setError('Could not load your complaints. Please try again.')
     } finally {
+      loadingRef.current = false
       if (mountedRef.current) setLoading(false)
     }
   }
@@ -72,6 +83,44 @@ export default function StudentPage() {
     // Load once per signed-in user; the retry button re-runs loadComplaints.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id])
+
+  // Day 10A — after a successful delete the detail page navigates here with
+  // the deleted ticket in router state; show the banner once and clear the
+  // state so a refresh does not repeat it.
+  useEffect(() => {
+    if (location.state?.deletedTicket) {
+      setDeletedTicket(location.state.deletedTicket)
+      navigate(location.pathname, { replace: true, state: null })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state?.deletedTicket])
+
+  // Day 10A — refetch quietly when the tab regains focus, so a complaint
+  // deleted (or status-changed) in another tab/session disappears from this
+  // already-open dashboard without a manual refresh. Realtime cannot deliver
+  // the soft-delete event (RLS drops events for rows the subscriber can no
+  // longer see), so this refocus refetch is the honest mechanism.
+  useEffect(() => {
+    function onVisibility() {
+      if (document.visibilityState === 'visible' && !loadingRef.current) {
+        fetchStudentComplaints()
+          .then((rows) => {
+            if (mountedRef.current) setComplaints(rows)
+          })
+          .catch((err) => {
+            // Quiet failure — the list keeps its current (possibly stale)
+            // data; the retry path still exists on the explicit error state.
+            console.error('[student-dashboard] background refresh failed', err)
+          })
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('focus', onVisibility)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('focus', onVisibility)
+    }
+  }, [])
 
   const total = complaints.length
   const closedCount = complaints.filter((c) => CLOSED_STATUSES.has(c.status)).length
@@ -97,6 +146,19 @@ export default function StudentPage() {
           New Complaint
         </Link>
       </div>
+
+      {/* Day 10A — success banner after deleting a complaint on the detail
+          page. The complaint is already gone from the list (RLS). */}
+      {deletedTicket && (
+        <div
+          role="status"
+          className="rounded-lg border border-green-200 bg-green-50 p-4 text-sm text-green-800 shadow-sm"
+        >
+          Complaint{' '}
+          <span className="font-mono font-semibold">{deletedTicket}</span> was
+          deleted. It can no longer be accessed from the complaint portal.
+        </div>
+      )}
 
       {/* Summary */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">

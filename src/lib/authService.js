@@ -77,20 +77,48 @@ export async function signIn(email, password) {
   return data
 }
 
-export async function signUp(email, password) {
+export async function signUp(email, password, role = 'student') {
   const client = ensureSupabase()
   const { data, error } = await client.auth.signUp({
     email,
     password,
     options: {
       // Informational only — the authoritative role is created by the
-      // database sign-up trigger as 'student'. This metadata is never used
-      // for access decisions.
-      data: { role: 'student' },
+      // database sign-up trigger as 'student' (Day 3) and later elevated to
+      // 'faculty' ONLY by the Day 10C register_faculty SECURITY DEFINER RPC.
+      // This metadata is never used for access decisions.
+      data: { role },
     },
   })
   if (error) throw error
   return data
+}
+
+/**
+ * Day 10C — completes faculty registration for the CURRENTLY SIGNED-IN user.
+ *
+ * This is the ONLY path that elevates a profile to faculty. It calls the
+ * SECURITY DEFINER RPC public.register_faculty, which verifies INSIDE the
+ * database that the caller is authenticated, owns the profile (auth.uid() —
+ * never accepted from the client), has a verified email, submitted the
+ * correct private registration code, picked an existing department and
+ * non-sensitive categories mapped to that department — and then atomically
+ * sets profiles.role = 'faculty', profiles.department_id and the
+ * faculty_category_assignments rows. The client sends ONLY the code, the
+ * department id and the category ids; role / identity / routing are never
+ * client-controlled. Returns one safe row per created assignment:
+ *   { profile_id, role: 'faculty', department_id, department, category_id,
+ *     category }
+ */
+export async function registerFaculty({ registrationCode, departmentId, categoryIds }) {
+  const client = ensureSupabase()
+  const { data, error } = await client.rpc('register_faculty', {
+    p_registration_code: registrationCode,
+    p_department_id: departmentId,
+    p_category_ids: categoryIds,
+  })
+  if (error) throw error
+  return data ?? []
 }
 
 export async function signOut() {

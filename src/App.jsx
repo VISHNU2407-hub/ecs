@@ -5,6 +5,7 @@ import ProtectedRoute, { PublicOnlyRoute } from './components/ProtectedRoute.jsx
 import { AuthProvider } from './context/AuthContext.jsx'
 import LoginPage from './pages/LoginPage.jsx'
 import RegisterPage from './pages/RegisterPage.jsx'
+import FacultyRegisterPage from './pages/FacultyRegisterPage.jsx'
 import ForgotPasswordPage from './pages/ForgotPasswordPage.jsx'
 import UpdatePasswordPage from './pages/UpdatePasswordPage.jsx'
 import StudentPage from './pages/StudentPage.jsx'
@@ -44,6 +45,11 @@ export default function App() {
         />
         <Route path="/forgot-password" element={<ForgotPasswordPage />} />
         <Route path="/update-password" element={<UpdatePasswordPage />} />
+        {/* Day 10C — faculty self-registration. NOT wrapped in PublicOnlyRoute:
+            a signed-in STUDENT may land here to complete a registration that
+            had to wait for email verification; the page itself redirects
+            already-registered staff to their dashboard. */}
+        <Route path="/faculty/register" element={<FacultyRegisterPage />} />
 
         {/*
           Role-based areas. Each is wrapped in the shared layout and the
